@@ -17,7 +17,7 @@
 --   6. displayed mode, setpoint, temperature and operating state match the device
 --   7. no displayed temperature or setpoint outside -40..80 °C
 --   8. the driver never sends a write the firmware would reject (quirks)
---   9. every clock write is local standard time from the utcOffset preference (#19)
+--   9. every clock write is current local time: UTC + utcOffset + EU summer time (#19, #23)
 local test              = require "integration_test"
 local t_utils           = require "integration_test.utils"
 local zigbee_test_utils = require "integration_test.zigbee_test_utils"
@@ -36,7 +36,9 @@ local MAX_TX_PER_DEVICE_EVENT = 4
 local RATE_WINDOW_S = 5 * 60
 local MAX_TX_PER_WINDOW = 9 + 4 + 2 + 6
 
-local START_TIME = 1790000000 -- 2026; the driver skips clock syncs while the hub clock is unset
+-- Runs start at a random moment in 2026 (both seasons, sometimes across a summer time
+-- changeover); the driver skips clock syncs while the hub clock is unset.
+local YEAR_2026 = 1767225600
 
 local profile = t_utils.get_profile_definition("namron-edge-thermostat.yml")
 
@@ -65,6 +67,8 @@ local PREFS = {
   -- no attribute of its own: changes the value of clock syncs (#19)
   utcOffset        = { values = { 0, 1, 2, 5.5, -5, 14, -12, 15, -13 },
                        valid = function(v) return v >= -12 and v <= 14 end },
+  euSummerTime     = { values = { true, false },
+                       valid = function(v) return type(v) == "boolean" end },
 }
 local PREF_NAMES = {}
 for name in pairs(PREFS) do PREF_NAMES[#PREF_NAMES + 1] = name end
@@ -82,12 +86,28 @@ for name, p in pairs(PREFS) do
 end
 local TIME_KEY = attr_key("time")
 
---- What 0x800B must be: local standard time from the utcOffset preference (#19),
---- rounded to 15 minutes, 1 h (CET) if the preference is invalid.
-local function expected_thermostat_time(utc_offset)
-  local quarters = type(utc_offset) == "number" and math.floor(utc_offset * 4 + 0.5) or nil
+--- EU summer time at `epoch`, worked out from os.date independently of the driver's arithmetic:
+--- from 01:00 UTC on the last Sunday of March to 01:00 UTC on the last Sunday of October.
+local function eu_summer_time_oracle(epoch)
+  local d = os.date("!*t", epoch)
+  if d.month < 3 or d.month > 10 then return false end
+  if d.month > 3 and d.month < 10 then return true end
+  local wday_31 = (d.wday - 1 + (31 - d.day)) % 7 -- 0 = Sunday
+  local last_sunday = 31 - wday_31
+  local after = d.day > last_sunday or (d.day == last_sunday and d.hour >= 1)
+  if d.month == 3 then return after end
+  return not after
+end
+
+--- What 0x800B must be: current local time (#19, #23) = UTC + utcOffset (rounded to 15 min,
+--- 1 h if invalid) + 1 h during EU summer time unless euSummerTime is off.
+local function expected_thermostat_time(prefs)
+  local v = prefs.utcOffset
+  local quarters = type(v) == "number" and math.floor(v * 4 + 0.5) or nil
   if quarters == nil or quarters < -48 or quarters > 56 then quarters = 4 end
-  return os.time() - 946684800 + quarters * 15 * 60
+  local now = os.time()
+  local summer = prefs.euSummerTime ~= false and eu_summer_time_oracle(now)
+  return now - 946684800 + quarters * 15 * 60 + (summer and 3600 or 0)
 end
 local CLOCK_ATTRS = { [attr_key("time")] = true, [attr_key("time_sync_request")] = true }
 local CONTROL_ATTRS = { [attr_key("system_mode")] = true, [attr_key("heating_setpoint")] = true,
@@ -150,10 +170,10 @@ local function run(seed, device)
             end
           end
         elseif key == TIME_KEY then
-          local want = expected_thermostat_time(prefs.utcOffset)
+          local want = expected_thermostat_time(prefs)
           if w.value ~= want then
-            fail("clock write %d is %+d s off local standard time (utcOffset %s)", w.value, w.value - want,
-              tostring(prefs.utcOffset))
+            fail("clock write %d is %+d s off local time (utcOffset %s, euSummerTime %s, %s UTC)", w.value,
+              w.value - want, tostring(prefs.utcOffset), tostring(prefs.euSummerTime), os.date("!%F %T", os.time()))
           end
         elseif not CLOCK_ATTRS[key] then
           fail("unexpected write to cluster 0x%04X attribute 0x%04X", d.cluster, w.id)
@@ -238,7 +258,7 @@ local function run(seed, device)
   end
 
   -- Start: either a fresh join (added + doConfigure) or a switch from another driver.
-  test.mock_time.advance_time(START_TIME)
+  test.mock_time.advance_time(YEAR_2026 + rng:int(0, 365 * 86400 - 1))
   if rng:chance(0.5) then
     step("start", "added + doConfigure", function()
       device:expect_metadata_update({ provisioning_state = "PROVISIONED" })

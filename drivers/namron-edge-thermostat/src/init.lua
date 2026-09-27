@@ -152,10 +152,35 @@ local function send_thermostat_command(device, cmd_id, flag)
   }))
 end
 
--- The thermostat has no time zone: it shows 0x800B as local *standard* time and adds
--- the summer hour itself ("Auto Daylight Saving" in its menu). Confirmed on a 4512783:
--- sending UTC showed UTC+1 in summer. The offset comes from the utcOffset preference.
+-- The thermostat has no time zone. With its Auto Sync Time on it shows 0x800B exactly as
+-- sent (its own daylight saving option is hidden), so the driver sends current local time:
+-- UTC + the utcOffset preference (standard time) + 1 h during EU summer time (#19, #23).
 local DEFAULT_UTC_OFFSET_MIN = 60 -- CET (Norway, Sweden, Denmark)
+
+--- Days since 1970-01-01 for a UTC date (proleptic Gregorian, H. Hinnant's algorithm).
+local function days_from_civil(y, m, d)
+  y = m <= 2 and y - 1 or y
+  local era = (y >= 0 and y or y - 399) // 400
+  local yoe = y - era * 400
+  local doy = (153 * (m > 2 and m - 3 or m + 9) + 2) // 5 + d - 1
+  local doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+  return era * 146097 + doe - 719468
+end
+
+--- Epoch seconds of 01:00 UTC on the last Sunday of `month` (EU summer time changeover).
+local function eu_changeover(year, month)
+  local last_day = days_from_civil(year, month, 31) -- March and October have 31 days
+  local weekday = (last_day + 4) % 7               -- 1970-01-01 was a Thursday; 0 = Sunday
+  return (last_day - weekday) * 86400 + 3600
+end
+
+--- True if EU summer time is in effect at `epoch` (seconds, UTC).
+local function eu_summer_time(epoch)
+  local year = 1970 + epoch // 31556952 -- average Gregorian year; exact except near 1 January
+  if epoch < days_from_civil(year, 1, 1) * 86400 then year = year - 1 end
+  if epoch >= days_from_civil(year + 1, 1, 1) * 86400 then year = year + 1 end
+  return epoch >= eu_changeover(year, 3) and epoch < eu_changeover(year, 10)
+end
 
 --- utcOffset preference (hours) as minutes, rounded to 15 minutes, or nil if invalid.
 local function valid_utc_offset_min(v)
@@ -167,11 +192,18 @@ local function utc_offset_min(device)
   return valid_utc_offset_min(device.preferences.utcOffset) or DEFAULT_UTC_OFFSET_MIN
 end
 
---- Push the hub's time to the thermostat, as local standard time.
+local FIELD_SYNCED_SUMMER = "namron_synced_summer_time"
+
+local function summer_time_applies(device, epoch)
+  return device.preferences.euSummerTime ~= false and eu_summer_time(epoch)
+end
+
+--- Push the hub's time to the thermostat, as current local time.
 --- @param force boolean bypass the rate limit (used for explicit user/configure actions)
 local function sync_clock(device, force)
   local now_epoch = os.time()
-  local now = now_epoch - EPOCH_2000 + utc_offset_min(device) * 60
+  local summer = summer_time_applies(device, now_epoch)
+  local now = now_epoch - EPOCH_2000 + (utc_offset_min(device) + (summer and 60 or 0)) * 60
   if now <= 0 then
     log.warn(string.format("[%s] hub clock not set, skipping thermostat clock sync", device.label))
     return
@@ -184,8 +216,19 @@ local function sync_clock(device, force)
     return
   end
   device:set_field(FIELD_LAST_CLOCK_SYNC, now_epoch)
+  device:set_field(FIELD_SYNCED_SUMMER, summer)
   write_custom(device, ATTR.TIME, data_types.Uint32, now)
   write_custom(device, ATTR.TIME_SYNC_REQUEST, data_types.Boolean, false)
+end
+
+--- Called from the poll: re-sync once when summer time has started or ended since the
+--- last sync, so the thermostat doesn't stay an hour out until it next asks.
+local function resync_after_summer_time_change(device)
+  if device.preferences.autoTimeSync == false then return end
+  local synced = device:get_field(FIELD_SYNCED_SUMMER)
+  if synced ~= nil and synced ~= summer_time_applies(device, os.time()) then
+    sync_clock(device, true)
+  end
 end
 
 local function read_mode_state(device)
@@ -477,7 +520,10 @@ end
 
 local function device_init(driver, device)
   -- The device does not always honour reporting configuration; poll as a safety net.
-  device.thread:call_on_schedule(POLL_INTERVAL_S, function() do_refresh(driver, device) end, "namron_poll")
+  device.thread:call_on_schedule(POLL_INTERVAL_S, function()
+    do_refresh(driver, device)
+    resync_after_summer_time_change(device)
+  end, "namron_poll")
 end
 
 -- Preference name -> function(device, new_value). Each writer validates its input and
@@ -523,6 +569,11 @@ local PREFERENCE_WRITERS = {
   end,
   utcOffset = function(device, v)
     if valid_utc_offset_min(v) == nil then return false end
+    if device.preferences.autoTimeSync ~= false then sync_clock(device, true) end
+    return true
+  end,
+  euSummerTime = function(device, v)
+    if type(v) ~= "boolean" then return false end
     if device.preferences.autoTimeSync ~= false then sync_clock(device, true) end
     return true
   end,
