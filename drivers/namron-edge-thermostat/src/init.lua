@@ -27,6 +27,9 @@ local generic_body      = require "st.zigbee.generic_body"
 local FrameCtrl         = require "st.zigbee.zcl.frame_ctrl"
 local utils             = require "st.utils"
 local log               = require "log"
+local zb_defaults_const = require "st.zigbee.constants"
+local default_energy_handler = require "st.zigbee.defaults.energyMeter_defaults.energy_meter_handler"
+local default_power_handler  = require "st.zigbee.defaults.powerMeter_defaults.active_power_meter_handler"
 
 local Thermostat            = clusters.Thermostat
 local ThermostatUI          = clusters.ThermostatUserInterfaceConfiguration
@@ -256,6 +259,50 @@ local function time_sync_request_handler(driver, device, value, zb_rx)
   if (value.value == true or value.value == 1) and device.preferences.autoTimeSync ~= false then
     sync_clock(device, false)
   end
+end
+
+-- ---------------------------------------------------------------------------
+-- Power / energy: only emit once the device's scaling factors are known.
+-- Without the Metering divisor (100 on this device) the first energy report after
+-- a driver switch was emitted 100x too high (15668 kWh instead of 156.68 kWh),
+-- which corrupts energy history and statistics in SmartThings and Home Assistant.
+-- ---------------------------------------------------------------------------
+local POWER_FALLBACK_AFTER_SKIPS = 3
+local FIELD_POWER_SKIPS = "namron_power_scale_skips"
+
+local function request_metering_scale(device)
+  device:send(SimpleMetering.attributes.Multiplier:read(device))
+  device:send(SimpleMetering.attributes.Divisor:read(device))
+end
+
+local function request_power_scale(device)
+  device:send(ElectricalMeasurement.attributes.ACPowerMultiplier:read(device))
+  device:send(ElectricalMeasurement.attributes.ACPowerDivisor:read(device))
+end
+
+local function energy_handler(driver, device, value, zb_rx)
+  if device:get_field(zb_defaults_const.SIMPLE_METERING_DIVISOR_KEY) == nil then
+    -- Never guess for a cumulative meter: a wrong value can't be taken back.
+    log.info(string.format("[%s] energy scale unknown, requesting it before reporting energy", device.label))
+    request_metering_scale(device)
+    return
+  end
+  default_energy_handler(driver, device, value, zb_rx)
+end
+
+local function power_handler(driver, device, value, zb_rx)
+  if device:get_field(zb_defaults_const.ELECTRICAL_MEASUREMENT_DIVISOR_KEY) == nil then
+    local skips = (device:get_field(FIELD_POWER_SKIPS) or 0) + 1
+    device:set_field(FIELD_POWER_SKIPS, skips)
+    if skips <= POWER_FALLBACK_AFTER_SKIPS then
+      request_power_scale(device)
+      return
+    end
+    -- Instantaneous value: after a few attempts, fall back to the raw value rather
+    -- than never showing power on firmware that doesn't expose the divisor.
+    log.warn(string.format("[%s] power divisor not available, reporting raw watts", device.label))
+  end
+  default_power_handler(driver, device, value, zb_rx)
 end
 
 -- ---------------------------------------------------------------------------
@@ -493,6 +540,12 @@ local namron_template = {
   },
   zigbee_handlers = {
     attr = {
+      [SimpleMetering.ID] = {
+        [SimpleMetering.attributes.CurrentSummationDelivered.ID] = energy_handler,
+      },
+      [ElectricalMeasurement.ID] = {
+        [ElectricalMeasurement.attributes.ActivePower.ID] = power_handler,
+      },
       [Thermostat.ID] = {
         [Thermostat.attributes.LocalTemperature.ID]                   = local_temperature_handler,
         [Thermostat.attributes.OccupiedHeatingSetpoint.ID]            = heating_setpoint_handler,

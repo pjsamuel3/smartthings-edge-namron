@@ -274,14 +274,51 @@ test.register_message_test(
   }
 )
 
-test.register_message_test(
-  "Power report uses the default power meter handler",
-  {
-    { channel = "zigbee", direction = "receive",
-      message = { mock_device.id, clusters.ElectricalMeasurement.attributes.ActivePower:build_test_attr_report(mock_device, 1200) } },
-    { channel = "capability", direction = "send",
-      message = mock_device:generate_test_message("main", capabilities.powerMeter.power({ value = 1200.0, unit = "W" })) },
-  }
+test.register_coroutine_test(
+  "Power is scaled with the device's divisor once known",
+  function()
+    local EM = clusters.ElectricalMeasurement
+    test.socket.zigbee:__queue_receive({ mock_device.id, EM.attributes.ACPowerDivisor:build_test_attr_report(mock_device, 1) })
+    test.socket.zigbee:__queue_receive({ mock_device.id, EM.attributes.ActivePower:build_test_attr_report(mock_device, 1200) })
+    test.socket.capability:__expect_send(mock_device:generate_test_message("main",
+      capabilities.powerMeter.power({ value = 1200.0, unit = "W" })))
+    test.wait_for_events()
+  end
+)
+
+test.register_coroutine_test(
+  "Bug #8: energy is not reported until the metering divisor is known (no 100x spike)",
+  function()
+    local SM = clusters.SimpleMetering
+    -- report arrives before the divisor: nothing emitted, scale requested
+    test.socket.zigbee:__queue_receive({ mock_device.id, SM.attributes.CurrentSummationDelivered:build_test_attr_report(mock_device, 15668) })
+    test.socket.zigbee:__expect_send({ mock_device.id, SM.attributes.Multiplier:read(mock_device) })
+    test.socket.zigbee:__expect_send({ mock_device.id, SM.attributes.Divisor:read(mock_device) })
+    test.wait_for_events()
+    -- divisor arrives, next report is scaled correctly
+    test.socket.zigbee:__queue_receive({ mock_device.id, SM.attributes.Divisor:build_test_attr_report(mock_device, 100) })
+    test.socket.zigbee:__queue_receive({ mock_device.id, SM.attributes.CurrentSummationDelivered:build_test_attr_report(mock_device, 15668) })
+    test.socket.capability:__expect_send(mock_device:generate_test_message("main",
+      capabilities.energyMeter.energy({ value = 156.68, unit = "kWh" })))
+    test.wait_for_events()
+  end
+)
+
+test.register_coroutine_test(
+  "Power falls back to raw watts if the device never reports a divisor",
+  function()
+    local EM = clusters.ElectricalMeasurement
+    for _ = 1, 3 do
+      test.socket.zigbee:__queue_receive({ mock_device.id, EM.attributes.ActivePower:build_test_attr_report(mock_device, 800) })
+      test.socket.zigbee:__expect_send({ mock_device.id, EM.attributes.ACPowerMultiplier:read(mock_device) })
+      test.socket.zigbee:__expect_send({ mock_device.id, EM.attributes.ACPowerDivisor:read(mock_device) })
+      test.wait_for_events()
+    end
+    test.socket.zigbee:__queue_receive({ mock_device.id, EM.attributes.ActivePower:build_test_attr_report(mock_device, 800) })
+    test.socket.capability:__expect_send(mock_device:generate_test_message("main",
+      capabilities.powerMeter.power({ value = 800.0, unit = "W" })))
+    test.wait_for_events()
+  end
 )
 
 test.register_message_test(

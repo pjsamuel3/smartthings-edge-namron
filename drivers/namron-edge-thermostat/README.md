@@ -30,6 +30,7 @@ These come from the Zigbee2MQTT converter (`zigbee-herdsman-converters/src/devic
 - Clock: time is sent as seconds since 2000-01-01 UTC (attribute 0x800B). The driver answers the device's sync request (0x800A), at most once every 5 minutes.
 - Temperatures reported outside −40…80 °C, and the ZCL "invalid" value 0x8000, are ignored.
 - The generic `auto` thermostat mode maps to the thermostat's weekly schedule.
+- Energy uses the Metering divisor (100 on firmware seen so far: raw 15668 = 156.68 kWh). The driver doesn't report energy until the divisor is known, because a wrong cumulative value can't be taken back. Power waits for the Electrical Measurement divisor the same way, but falls back to raw watts after 3 reports.
 - The temperature always comes from whichever sensor is active. The thermostat doesn't report separate readings per sensor.
 
 ## Not implemented yet
