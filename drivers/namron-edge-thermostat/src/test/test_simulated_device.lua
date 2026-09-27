@@ -17,6 +17,7 @@
 --   6. displayed mode, setpoint, temperature and operating state match the device
 --   7. no displayed temperature or setpoint outside -40..80 °C
 --   8. the driver never sends a write the firmware would reject (quirks)
+--   9. every clock write is local standard time from the utcOffset preference (#19)
 local test              = require "integration_test"
 local t_utils           = require "integration_test.utils"
 local zigbee_test_utils = require "integration_test.zigbee_test_utils"
@@ -61,6 +62,9 @@ local PREFS = {
                        valid = function(v) return type(v) == "boolean" end },
   autoTimeSync     = { attr = "auto_time",         values = { true, false, "true" },
                        valid = function(v) return type(v) == "boolean" end },
+  -- no attribute of its own: changes the value of clock syncs (#19)
+  utcOffset        = { values = { 0, 1, 2, 5.5, -5, 14, -12, 15, -13 },
+                       valid = function(v) return v >= -12 and v <= 14 end },
 }
 local PREF_NAMES = {}
 for name in pairs(PREFS) do PREF_NAMES[#PREF_NAMES + 1] = name end
@@ -73,16 +77,22 @@ end
 
 -- attribute key -> preference that may write it
 local PREF_BY_ATTR = {}
-for name, p in pairs(PREFS) do PREF_BY_ATTR[attr_key(p.attr)] = name end
+for name, p in pairs(PREFS) do
+  if p.attr then PREF_BY_ATTR[attr_key(p.attr)] = name end
+end
+local TIME_KEY = attr_key("time")
+
+--- What 0x800B must be: local standard time from the utcOffset preference (#19),
+--- rounded to 15 minutes, 1 h (CET) if the preference is invalid.
+local function expected_thermostat_time(utc_offset)
+  local quarters = type(utc_offset) == "number" and math.floor(utc_offset * 4 + 0.5) or nil
+  if quarters == nil or quarters < -48 or quarters > 56 then quarters = 4 end
+  return os.time() - 946684800 + quarters * 15 * 60
+end
 local CLOCK_ATTRS = { [attr_key("time")] = true, [attr_key("time_sync_request")] = true }
 local CONTROL_ATTRS = { [attr_key("system_mode")] = true, [attr_key("heating_setpoint")] = true,
                         [attr_key("frost")] = true }
 
-local function default_preferences()
-  local prefs = {}
-  for _, p in ipairs(profile.preferences) do prefs[p.name] = p.definition.default end
-  return prefs
-end
 
 -- ---------------------------------------------------------------------------
 -- One randomised run
@@ -111,6 +121,11 @@ local function run(seed, device)
     error(table.concat(lines, "\n"), 0)
   end
 
+  -- The test framework's profile loader drops the preferences section, so the device starts
+  -- with none set and the driver uses its built-in defaults, like a thermostat whose settings
+  -- were never changed.
+  local prefs = {}
+
   local s = sim.new(device, rng, scenario, function(rx)
     test.socket.zigbee:__queue_receive({ device.id, rx })
   end)
@@ -133,6 +148,12 @@ local function run(seed, device)
             if w.value < 500 or w.value > max then
               fail("setpoint write %d outside 500..%d", w.value, max)
             end
+          end
+        elseif key == TIME_KEY then
+          local want = expected_thermostat_time(prefs.utcOffset)
+          if w.value ~= want then
+            fail("clock write %d is %+d s off local standard time (utcOffset %s)", w.value, w.value - want,
+              tostring(prefs.utcOffset))
           end
         elseif not CLOCK_ATTRS[key] then
           fail("unexpected write to cluster 0x%04X attribute 0x%04X", d.cluster, w.id)
@@ -160,8 +181,6 @@ local function run(seed, device)
       if value < -40 or value > 80 then fail("implausible %s %s displayed", key, tostring(value)) end
     end
   end
-
-  local prefs = default_preferences()
 
   local function check_after_step()
     if #s.rejected > 0 then fail("device rejected: %s", s.rejected[1]) end
@@ -267,7 +286,7 @@ local function run(seed, device)
       local p = PREFS[name]
       local value = rng:pick(p.values)
       step("prefs", name .. " = " .. tostring(value), function()
-        if value ~= prefs[name] and p.valid(value) then ctx.allowed[attr_key(p.attr)] = true end
+        if p.attr and value ~= prefs[name] and p.valid(value) then ctx.allowed[attr_key(p.attr)] = true end
         prefs[name] = value
         local new_prefs = {}
         for k, v in pairs(prefs) do new_prefs[k] = v end
