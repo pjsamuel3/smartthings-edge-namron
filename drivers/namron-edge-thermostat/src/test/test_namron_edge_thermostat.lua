@@ -608,4 +608,23 @@ test.register_coroutine_test(
   end
 )
 
+test.register_coroutine_test(
+  "Profile: every preference title is 3-36 characters (SmartThings rejects the package otherwise)",
+  function()
+    -- the framework's profile loader drops preferences, so read the file itself
+    local f = assert(io.open("../profiles/namron-edge-thermostat.yml"))
+    local count = 0
+    for line in f:lines() do
+      local title = line:match('^%s+title:%s*"(.-)"%s*$')
+      if title ~= nil then
+        count = count + 1
+        local n = utf8.len(title)
+        assert(n >= 3 and n <= 36, string.format("preference title %q is %d characters", title, n))
+      end
+    end
+    f:close()
+    assert(count >= 10, "expected to find the preference titles, found " .. count)
+  end
+)
+
 test.run_registered_tests()
