@@ -152,11 +152,26 @@ local function send_thermostat_command(device, cmd_id, flag)
   }))
 end
 
---- Push the hub's time to the thermostat.
+-- The thermostat has no time zone: it shows 0x800B as local *standard* time and adds
+-- the summer hour itself ("Auto Daylight Saving" in its menu). Confirmed on a 4512783:
+-- sending UTC showed UTC+1 in summer. The offset comes from the utcOffset preference.
+local DEFAULT_UTC_OFFSET_MIN = 60 -- CET (Norway, Sweden, Denmark)
+
+--- utcOffset preference (hours) as minutes, rounded to 15 minutes, or nil if invalid.
+local function valid_utc_offset_min(v)
+  local quarters = to_int_in_range((tonumber(v) or 0/0) * 4, -48, 56)
+  return quarters and quarters * 15
+end
+
+local function utc_offset_min(device)
+  return valid_utc_offset_min(device.preferences.utcOffset) or DEFAULT_UTC_OFFSET_MIN
+end
+
+--- Push the hub's time to the thermostat, as local standard time.
 --- @param force boolean bypass the rate limit (used for explicit user/configure actions)
 local function sync_clock(device, force)
   local now_epoch = os.time()
-  local now = now_epoch - EPOCH_2000
+  local now = now_epoch - EPOCH_2000 + utc_offset_min(device) * 60
   if now <= 0 then
     log.warn(string.format("[%s] hub clock not set, skipping thermostat clock sync", device.label))
     return
@@ -504,6 +519,11 @@ local PREFERENCE_WRITERS = {
     device:set_field(FIELD_MAX_HEAT_TEMP, n, { persist = true })
     device:emit_event(HeatingSetpoint.heatingSetpointRange({ value = { minimum = 5, maximum = n }, unit = "C" },
       { visibility = { displayed = false } }))
+    return true
+  end,
+  utcOffset = function(device, v)
+    if valid_utc_offset_min(v) == nil then return false end
+    if device.preferences.autoTimeSync ~= false then sync_clock(device, true) end
     return true
   end,
   autoTimeSync = function(device, v)

@@ -34,6 +34,11 @@ local function test_init()
 end
 test.set_test_init_function(test_init)
 
+-- The thermostat takes local *standard* time (#19); utcOffset defaults to 1 h (CET).
+local function thermostat_time(offset_hours)
+  return os.time() - 946684800 + math.floor((offset_hours or 1) * 3600)
+end
+
 local SUPPORTED_MODES = { "off", "heat", "eco", "schedule", "frostguard" }
 
 local function mode_event(mode)
@@ -241,7 +246,7 @@ test.register_coroutine_test(
     test.socket.zigbee:__queue_receive({ mock_device.id, custom_report(0x800A, data_types.Boolean.ID, true) })
     test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x800B) })
     test.socket.zigbee:__expect_send({ mock_device.id,
-      custom_write(0x800B, data_types.Uint32(os.time() - 946684800)) })
+      custom_write(0x800B, data_types.Uint32(thermostat_time())) })
     test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x800A) })
     test.socket.zigbee:__expect_send({ mock_device.id, custom_write(0x800A, data_types.Boolean(false)) })
     test.wait_for_events()
@@ -380,7 +385,7 @@ local function expect_configure_messages()
     SM.attributes.Multiplier:read(mock_device),
     SM.attributes.Divisor:read(mock_device),
     custom_read(0x800B),
-    custom_write(0x800B, data_types.Uint32(os.time() - 946684800)),
+    custom_write(0x800B, data_types.Uint32(thermostat_time())),
     custom_read(0x800A),
     custom_write(0x800A, data_types.Boolean(false)),
     Thermostat.attributes.LocalTemperature:read(mock_device),
@@ -496,7 +501,7 @@ test.register_coroutine_test(
     local function expect_sync()
       test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x800B) })
       test.socket.zigbee:__expect_send({ mock_device.id,
-        custom_write(0x800B, data_types.Uint32(os.time() - 946684800)) })
+        custom_write(0x800B, data_types.Uint32(thermostat_time())) })
       test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x800A) })
       test.socket.zigbee:__expect_send({ mock_device.id, custom_write(0x800A, data_types.Boolean(false)) })
     end
@@ -547,6 +552,30 @@ test.register_coroutine_test(
     test.socket.zigbee:__expect_send({ mock_device.id,
       Thermostat.attributes.OccupiedHeatingSetpoint:write(mock_device, 2000) })
     test.wait_for_events()
+  end
+)
+
+test.register_coroutine_test(
+  "#19: changing the time zone syncs the clock as local standard time",
+  function()
+    test.mock_time.advance_time(1790000000)
+    test.socket.device_lifecycle:__queue_receive(mock_device:generate_info_changed({
+      preferences = { utcOffset = 2 } }))
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x800B) })
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_write(0x800B, data_types.Uint32(thermostat_time(2))) })
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x800A) })
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_write(0x800A, data_types.Boolean(false)) })
+    test.wait_for_events()
+  end
+)
+
+test.register_coroutine_test(
+  "#19: an out-of-range time zone is ignored",
+  function()
+    test.mock_time.advance_time(1790000000)
+    test.socket.device_lifecycle:__queue_receive(mock_device:generate_info_changed({
+      preferences = { utcOffset = 20 } }))
+    expect_only_refresh_after()
   end
 )
 
