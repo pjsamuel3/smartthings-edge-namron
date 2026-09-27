@@ -18,7 +18,7 @@ Is your Namron device missing? See [Contributing](CONTRIBUTING.md). Most devices
 
 ### Option A – from a driver channel (no tools needed)
 
-1. Open the channel invite link: **_(link will be added here once the channel is published)_**
+1. Open the channel invite link: **https://bestow-regional.api.smartthings.com/invite/1PlY15Aqw3le** (channel *Namron Edge Drivers*)
 2. Sign in with your Samsung account, **Enroll** your hub, then **Available Drivers → Install** the driver.
 3. In the SmartThings app, open the device, then tap **⋮ → Driver → Select a different driver** and choose **Namron Edge Thermostat**.
    New devices you pair after installing the driver will use it automatically.
