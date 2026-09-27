@@ -15,7 +15,7 @@ Without this driver, SmartThings pairs these thermostats as *Zigbee Switch*, whi
 | Humidity | Relative Humidity cluster |
 | Power (W), energy (kWh) | Electrical Measurement, Metering |
 
-**Settings:** sensor mode, temperature calibration, child lock, open-window detection, display brightness, display timeout, regulator %, maximum setpoint, clock sync from the hub, and time zone.
+**Settings:** sensor mode, temperature calibration, child lock, open-window detection, display brightness, display timeout, regulator %, maximum setpoint, clock sync from the hub, time zone, and EU summer time.
 
 A setting is only sent to the thermostat when you change it. The settings page can't show what the thermostat is set to right now. When you switch an existing device to this driver, **no settings are sent**, so the thermostat keeps its current configuration until you change something. To apply a value the page already shows (for example *Floor sensor*), select a different value, then the one you want.
 
@@ -27,7 +27,9 @@ These come from the Zigbee2MQTT converter (`zigbee-herdsman-converters/src/devic
 - Every custom write is sent after a read, because the firmware rejects the write otherwise.
 - Writes ask for a default response, because the firmware returns NOT_AUTHORIZED without one.
 - Eco and schedule use the thermostat's own commands 0x08 (setEco) and 0x07 (setProgram). Writing the ProgrammingOperationMode value directly is ignored.
-- Clock: attribute 0x800B is seconds since 2000-01-01 in **local standard time**. The thermostat has no time zone of its own, and adds the summer hour itself when *Auto Daylight Saving* is on in its Time menu. Confirmed on a 4512783: sending UTC showed UTC+1 in summer (#19). The driver sends UTC plus the *Time zone* setting (standard time, default +1 for Norway, Sweden and Denmark). Leave *Auto Daylight Saving* on; if you turn it off, include summer time in the setting. The driver answers the device's sync request (0x800A) at most once every 5 minutes, and syncs straight away when the setting changes.
+- Clock: attribute 0x800B is seconds since 2000-01-01 in **current local time**. The thermostat has no time zone, and with *Auto Sync Time* on it shows exactly what it's sent (its own *Auto Daylight Saving* option is hidden). Confirmed on a 4512783 (#19, #23).
+  - The driver sends UTC + the *Time zone* setting (standard time, default +1 for Norway, Sweden and Denmark) + 1 hour during EU summer time. EU summer time runs from 01:00 UTC on the last Sunday of March to the last Sunday of October; turn *Summer time (EU rules)* off elsewhere.
+  - The driver answers the device's sync request (0x800A) at most once every 5 minutes, and syncs straight away when either setting changes. When summer time starts or ends, the driver re-syncs once at its next 15-minute poll.
 - The value read back from 0x800B is the last sync time, not a running clock.
 - Temperatures reported outside −40…80 °C, and the ZCL "invalid" value 0x8000, are ignored.
 - The generic `auto` thermostat mode maps to the thermostat's weekly schedule.

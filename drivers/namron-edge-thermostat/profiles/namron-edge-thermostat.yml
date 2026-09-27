@@ -116,10 +116,17 @@ preferences:
       default: true
   - name: utcOffset
     title: "Time zone (hours from UTC)"
-    description: "Your standard (winter) time offset from UTC, e.g. 1 for Norway, Sweden and Denmark, 2 for Finland, 0 for the UK. Leave 'Auto Daylight Saving' on at the thermostat; it adds the summer hour itself."
+    description: "Your standard (winter) time offset from UTC, e.g. 1 for Norway, Sweden and Denmark, 2 for Finland, 0 for the UK. Summer time is added by the setting below."
     required: false
     preferenceType: number
     definition:
       minimum: -12
       maximum: 14
       default: 1
+  - name: euSummerTime
+    title: "Summer time (EU rules)"
+    description: "Add 1 hour from the last Sunday of March to the last Sunday of October, as in the EU, Norway and the UK. Turn off elsewhere and set the time zone above to your current offset."
+    required: false
+    preferenceType: boolean
+    definition:
+      default: true

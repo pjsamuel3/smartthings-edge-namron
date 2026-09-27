@@ -34,9 +34,10 @@ local function test_init()
 end
 test.set_test_init_function(test_init)
 
--- The thermostat takes local *standard* time (#19); utcOffset defaults to 1 h (CET).
+-- The thermostat takes current local time (#19, #23). Most tests run at 1790000000
+-- (21 Sep 2026, EU summer time): default utcOffset 1 h + 1 h summer time = 2 h.
 local function thermostat_time(offset_hours)
-  return os.time() - 946684800 + math.floor((offset_hours or 1) * 3600)
+  return os.time() - 946684800 + math.floor((offset_hours or 2) * 3600)
 end
 
 local SUPPORTED_MODES = { "off", "heat", "eco", "schedule", "frostguard" }
@@ -556,15 +557,108 @@ test.register_coroutine_test(
 )
 
 test.register_coroutine_test(
-  "#19: changing the time zone syncs the clock as local standard time",
+  "#19: changing the time zone syncs the clock (utcOffset 2 + summer time)",
   function()
     test.mock_time.advance_time(1790000000)
     test.socket.device_lifecycle:__queue_receive(mock_device:generate_info_changed({
       preferences = { utcOffset = 2 } }))
     test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x800B) })
-    test.socket.zigbee:__expect_send({ mock_device.id, custom_write(0x800B, data_types.Uint32(thermostat_time(2))) })
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_write(0x800B, data_types.Uint32(thermostat_time(3))) })
     test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x800A) })
     test.socket.zigbee:__expect_send({ mock_device.id, custom_write(0x800A, data_types.Boolean(false)) })
+    test.wait_for_events()
+  end
+)
+
+--- Expect one clock sync (read-then-write of 0x800B and 0x800A) with the given offset.
+local function expect_clock_sync(offset_hours)
+  test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x800B) })
+  test.socket.zigbee:__expect_send({ mock_device.id,
+    custom_write(0x800B, data_types.Uint32(thermostat_time(offset_hours))) })
+  test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x800A) })
+  test.socket.zigbee:__expect_send({ mock_device.id, custom_write(0x800A, data_types.Boolean(false)) })
+end
+
+local function device_requests_clock_sync()
+  test.socket.zigbee:__queue_receive({ mock_device.id, custom_report(0x800A, data_types.Boolean.ID, true) })
+end
+
+test.register_coroutine_test(
+  "#23: in winter no summer hour is added",
+  function()
+    test.mock_time.advance_time(1768478400) -- 15 Jan 2026 12:00 UTC
+    device_requests_clock_sync()
+    expect_clock_sync(1)
+    test.wait_for_events()
+  end
+)
+
+-- EU summer time changes at 01:00 UTC on the last Sunday of March and of October.
+for _, case in ipairs({
+  { "29 Mar 2026 00:59:59 UTC, just before summer time", 1774746000 - 1, 1 },
+  { "29 Mar 2026 01:00:00 UTC, summer time starts",      1774746000,     2 },
+  { "25 Oct 2026 00:59:59 UTC, last second of summer",   1792890000 - 1, 2 },
+  { "25 Oct 2026 01:00:00 UTC, summer time ends",        1792890000,     1 },
+}) do
+  local label, epoch, offset = case[1], case[2], case[3]
+  test.register_coroutine_test(
+    "#23: " .. label .. " -> UTC+" .. offset,
+    function()
+      test.mock_time.advance_time(epoch)
+      device_requests_clock_sync()
+      expect_clock_sync(offset)
+      test.wait_for_events()
+    end
+  )
+end
+
+local function refresh_reads()
+  return {
+    Thermostat.attributes.LocalTemperature:read(mock_device),
+    Thermostat.attributes.OccupiedHeatingSetpoint:read(mock_device),
+    Thermostat.attributes.ThermostatRunningState:read(mock_device),
+    Thermostat.attributes.SystemMode:read(mock_device),
+    Thermostat.attributes.ThermostatProgrammingOperationMode:read(mock_device),
+    custom_read(0x8001),
+    clusters.RelativeHumidity.attributes.MeasuredValue:read(mock_device),
+    clusters.ElectricalMeasurement.attributes.ActivePower:read(mock_device),
+    clusters.SimpleMetering.attributes.CurrentSummationDelivered:read(mock_device),
+  }
+end
+
+test.register_coroutine_test(
+  "#23: the poll re-syncs the clock once when summer time starts",
+  function()
+    test.socket.zigbee:__set_channel_ordering("relaxed")
+    -- 10 minutes before the changeover: the first poll runs, and the device asks for the time
+    test.mock_time.advance_time(1774746000 - 600)
+    for _, msg in ipairs(refresh_reads()) do test.socket.zigbee:__expect_send({ mock_device.id, msg }) end
+    device_requests_clock_sync()
+    expect_clock_sync(1)
+    test.wait_for_events()
+    -- next poll, after the changeover: refresh plus one forced sync with summer time
+    test.mock_time.advance_time(900)
+    for _, msg in ipairs(refresh_reads()) do test.socket.zigbee:__expect_send({ mock_device.id, msg }) end
+    expect_clock_sync(2)
+    test.wait_for_events()
+    -- the poll after that: refresh only
+    test.mock_time.advance_time(900)
+    for _, msg in ipairs(refresh_reads()) do test.socket.zigbee:__expect_send({ mock_device.id, msg }) end
+    test.wait_for_events()
+  end,
+  { test_init = function()
+      test.timer.__create_and_queue_test_time_advance_timer(900, "interval")
+      test.mock_device.add_test_device(mock_device)
+    end }
+)
+
+test.register_coroutine_test(
+  "#23: with summer time off, only the time zone is added",
+  function()
+    test.mock_time.advance_time(1790000000)
+    test.socket.device_lifecycle:__queue_receive(mock_device:generate_info_changed({
+      preferences = { euSummerTime = false } }))
+    expect_clock_sync(1)
     test.wait_for_events()
   end
 )
