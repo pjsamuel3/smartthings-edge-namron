@@ -83,6 +83,10 @@ local SENSOR_MODE_NAMES = {
 local FIELD_SYSTEM_MODE = "namron_system_mode"
 local FIELD_PROG_MODE   = "namron_prog_mode"
 local FIELD_FROST       = "namron_frost"
+-- Last max heat temp (°C) the driver validated and wrote to the thermostat. Setpoints are
+-- limited to this, never to the raw preference, which may hold a rejected value.
+local FIELD_MAX_HEAT_TEMP = "namron_max_heat_temp"
+local DEFAULT_MAX_HEAT_TEMP = 35
 
 local POLL_INTERVAL_S = 15 * 60
 -- Minimum time between clock syncs triggered by the device's own sync requests.
@@ -317,6 +321,10 @@ end
 -- ---------------------------------------------------------------------------
 -- Capability command handlers
 -- ---------------------------------------------------------------------------
+local function max_heat_temp(device)
+  return device:get_field(FIELD_MAX_HEAT_TEMP) or DEFAULT_MAX_HEAT_TEMP
+end
+
 local function set_heating_setpoint(driver, device, command)
   local value = tonumber(command.args.setpoint)
   if value == nil or value ~= value then
@@ -324,8 +332,7 @@ local function set_heating_setpoint(driver, device, command)
     return
   end
   if value >= 40 then value = utils.f_to_c(value) end -- assume Fahrenheit
-  local max = tonumber(device.preferences.maxHeatTemp) or 35
-  value = utils.clamp_value(value, 5, max)
+  value = utils.clamp_value(value, 5, max_heat_temp(device))
   device:send(Thermostat.attributes.OccupiedHeatingSetpoint:write(device, utils.round(value * 100)))
   device.thread:call_with_delay(2, function()
     device:send(Thermostat.attributes.OccupiedHeatingSetpoint:read(device))
@@ -436,8 +443,7 @@ end
 
 local function emit_static_attributes(device)
   device:emit_event(ThermostatMode.supportedThermostatModes(SUPPORTED_MODES, { visibility = { displayed = false } }))
-  local max = tonumber(device.preferences.maxHeatTemp) or 35
-  device:emit_event(HeatingSetpoint.heatingSetpointRange({ value = { minimum = 5, maximum = max }, unit = "C" },
+  device:emit_event(HeatingSetpoint.heatingSetpointRange({ value = { minimum = 5, maximum = max_heat_temp(device) }, unit = "C" },
     { visibility = { displayed = false } }))
 end
 
@@ -495,6 +501,7 @@ local PREFERENCE_WRITERS = {
     local n = to_int_in_range(v, 15, 35)
     if n == nil then return false end
     write_custom(device, ATTR.MAX_HEAT_TEMP, data_types.Int16, n * 10)
+    device:set_field(FIELD_MAX_HEAT_TEMP, n, { persist = true })
     device:emit_event(HeatingSetpoint.heatingSetpointRange({ value = { minimum = 5, maximum = n }, unit = "C" },
       { visibility = { displayed = false } }))
     return true

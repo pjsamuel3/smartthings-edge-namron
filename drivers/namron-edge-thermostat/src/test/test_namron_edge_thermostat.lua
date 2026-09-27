@@ -527,6 +527,29 @@ test.register_coroutine_test(
   end
 )
 
+test.register_coroutine_test(
+  "#16: setpoints are limited to the last valid max heat temp, not a rejected preference",
+  function()
+    test.socket.device_lifecycle:__queue_receive(mock_device:generate_info_changed({
+      preferences = { maxHeatTemp = 20 } }))
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x8025) })
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_write(0x8025, data_types.Int16(200)) })
+    test.socket.capability:__expect_send(mock_device:generate_test_message("main",
+      capabilities.thermostatHeatingSetpoint.heatingSetpointRange({ value = { minimum = 5, maximum = 20 }, unit = "C" },
+        { visibility = { displayed = false } })))
+    test.wait_for_events()
+    -- invalid value: not written, and must not raise the setpoint limit
+    test.socket.device_lifecycle:__queue_receive(mock_device:generate_info_changed({
+      preferences = { maxHeatTemp = 99 } }))
+    test.wait_for_events()
+    test.socket.capability:__queue_receive({ mock_device.id,
+      { capability = "thermostatHeatingSetpoint", component = "main", command = "setHeatingSetpoint", args = { 30 } } })
+    test.socket.zigbee:__expect_send({ mock_device.id,
+      Thermostat.attributes.OccupiedHeatingSetpoint:write(mock_device, 2000) })
+    test.wait_for_events()
+  end
+)
+
 test.register_message_test(
   "SR-3: an invalid (0x8000) setpoint report is not emitted",
   {
