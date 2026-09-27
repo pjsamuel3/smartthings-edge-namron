@@ -17,7 +17,7 @@ Without this driver, SmartThings pairs these thermostats as *Zigbee Switch*, whi
 
 **Settings:** sensor mode, temperature calibration, child lock, open-window detection, display brightness, display timeout, regulator %, maximum setpoint, and clock sync from the hub.
 
-A setting is only sent to the thermostat when you change it. The settings page can't show what the thermostat is set to right now.
+A setting is only sent to the thermostat when you change it. The settings page can't show what the thermostat is set to right now. When you switch an existing device to this driver, **no settings are sent**, so the thermostat keeps its current configuration until you change something. To apply a value the page already shows (for example *Floor sensor*), select a different value, then the one you want.
 
 ## Device notes
 
@@ -27,7 +27,9 @@ These come from the Zigbee2MQTT converter (`zigbee-herdsman-converters/src/devic
 - Every custom write is sent after a read, because the firmware rejects the write otherwise.
 - Writes ask for a default response, because the firmware returns NOT_AUTHORIZED without one.
 - Eco and schedule use the thermostat's own commands 0x08 (setEco) and 0x07 (setProgram). Writing the ProgrammingOperationMode value directly is ignored.
-- Clock: time is sent as seconds since 2000-01-01 UTC (attribute 0x800B). The driver answers the device's sync request (0x800A).
+- Clock: time is sent as seconds since 2000-01-01 UTC (attribute 0x800B). The driver answers the device's sync request (0x800A), at most once every 5 minutes.
+- Temperatures reported outside −40…80 °C, and the ZCL "invalid" value 0x8000, are ignored.
+- The generic `auto` thermostat mode maps to the thermostat's weekly schedule.
 - The temperature always comes from whichever sensor is active. The thermostat doesn't report separate readings per sensor.
 
 ## Not implemented yet
