@@ -33,6 +33,17 @@ These come from the Zigbee2MQTT converter (`zigbee-herdsman-converters/src/devic
 - Energy uses the Metering divisor (100 on firmware seen so far: raw 15668 = 156.68 kWh). The driver doesn't report energy until the divisor is known, because a wrong cumulative value can't be taken back. While it's unknown, the driver asks for it at most once every 5 minutes. Power waits for the Electrical Measurement divisor the same way, but falls back to raw watts after 3 reports.
 - The temperature always comes from whichever sensor is active. The thermostat doesn't report separate readings per sensor.
 
+## Tests
+
+`./scripts/test.sh` runs two test files:
+
+- `src/test/test_namron_edge_thermostat.lua`: fixed message sequences, one per behaviour or regression.
+- `src/test/test_simulated_device.lua`: randomised runs against a simulated thermostat (`src/test/namron_sim.lua`) that models the firmware quirks above. After every step it checks safety invariants: no unrequested writes, setpoint range, message rate, energy scaling, and displayed state matching the device. CI runs 20 fixed seeds of 200 steps each.
+  - A failure prints the seed and the last steps. Replay it with `SIM_SEED=<seed> ./scripts/test.sh`.
+  - Longer local soak runs: `SIM_RUNS=250 SIM_SEED_BASE=5000 ./scripts/test.sh`, and `SIM_STEPS` changes the run length.
+  - When a new seed finds a bug, fix it in its own PR with a regular regression test.
+  - Design: [docs/design/device-simulator.md](../../docs/design/device-simulator.md).
+
 ## Not implemented yet
 
 Vacation mode, the countdown timer, and showing open-window status in the app. These would need custom capabilities.
