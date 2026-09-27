@@ -22,7 +22,7 @@ Is your Namron device missing? See [Contributing](CONTRIBUTING.md). Most devices
 2. Sign in with your Samsung account, **Enroll** your hub, then **Available Drivers → Install** the driver.
 3. In the SmartThings app, open the device, then tap **⋮ → Driver → Select a different driver** and choose **Namron Edge Thermostat**.
    New devices you pair after installing the driver will use it automatically.
-4. Open the device's **⋮ → Settings** and set **Sensor mode** to match your installation (for example *Floor sensor* for floor heating).
+4. Open the device's **⋮ → Settings** and set **Sensor mode** to match your installation (for example *Floor sensor* for floor heating). Switching drivers doesn't change any settings on the thermostat. The page shows defaults, and a setting is only sent when you change it. If the value you want is already shown, select another value first, then the one you want.
 
 ### Option B – build and install it yourself with the SmartThings CLI
 

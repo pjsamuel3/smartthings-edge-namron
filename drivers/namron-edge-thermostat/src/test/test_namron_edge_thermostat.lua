@@ -361,4 +361,133 @@ test.register_coroutine_test(
   end
 )
 
+
+--- Queue a refresh and expect exactly its reads. Because channel ordering is strict,
+--- any message sent earlier by the handler under test makes this fail - which is how
+--- the tests below assert "nothing was sent to the device".
+local function expect_only_refresh_after(device)
+  device = device or mock_device
+  test.socket.capability:__queue_receive({ device.id,
+    { capability = "refresh", component = "main", command = "refresh", args = {} } })
+  for _, msg in ipairs({
+    Thermostat.attributes.LocalTemperature:read(device),
+    Thermostat.attributes.OccupiedHeatingSetpoint:read(device),
+    Thermostat.attributes.ThermostatRunningState:read(device),
+    Thermostat.attributes.SystemMode:read(device),
+    Thermostat.attributes.ThermostatProgrammingOperationMode:read(device),
+    cluster_base.read_attribute(device, data_types.ClusterId(Thermostat.ID), data_types.AttributeId(0x8001)),
+    clusters.RelativeHumidity.attributes.MeasuredValue:read(device),
+    clusters.ElectricalMeasurement.attributes.ActivePower:read(device),
+    clusters.SimpleMetering.attributes.CurrentSummationDelivered:read(device),
+  }) do
+    test.socket.zigbee:__expect_send({ device.id, msg })
+  end
+  test.wait_for_events()
+end
+
+-- A thermostat that was paired before this driver existed: it still has the stock
+-- "Zigbee Switch"-style profile, with none of this driver's preferences.
+local switched_device = test.mock_device.build_test_zigbee_device({
+  profile = {
+    components = { main = { id = "main", capabilities = {
+      { id = "switch", version = 1 }, { id = "powerMeter", version = 1 }, { id = "refresh", version = 1 },
+    } } },
+    preferences = {},
+  },
+  zigbee_endpoints = {
+    [1] = {
+      id = 1,
+      manufacturer = "Namron AS",
+      model = "4512783",
+      server_clusters = { 0x0000, 0x0003, 0x0006, 0x0201, 0x0204, 0x0405, 0x0702, 0x0B04 },
+    },
+  },
+})
+
+-- ---------------------------------------------------------------------------
+-- Security review 2026-09 regression tests
+-- ---------------------------------------------------------------------------
+
+test.register_coroutine_test(
+  "SR-1: preference defaults are NOT written when the profile changes (driver switch)",
+  function()
+    local namron_profile = t_utils.get_profile_definition("namron-edge-thermostat.yml")
+    test.socket.device_lifecycle:__queue_receive(switched_device:generate_info_changed({
+      profile = namron_profile,
+      preferences = { sensorMode = "1", childLock = false, windowDetection = false, panelBrightness = 50,
+                      screenOnTime = "1", regulatorPercent = 50, maxHeatTemp = 35, tempCalibration = 0,
+                      autoTimeSync = true },
+    }))
+    expect_only_refresh_after(switched_device)
+  end,
+  { test_init = function() test.mock_device.add_test_device(switched_device) end }
+)
+
+test.register_coroutine_test(
+  "SR-2: repeated clock sync requests from the device are rate limited",
+  function()
+    test.mock_time.advance_time(1790000000)
+    local function expect_sync()
+      test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x800B) })
+      test.socket.zigbee:__expect_send({ mock_device.id,
+        custom_write(0x800B, data_types.Uint32(os.time() - 946684800)) })
+      test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x800A) })
+      test.socket.zigbee:__expect_send({ mock_device.id, custom_write(0x800A, data_types.Boolean(false)) })
+    end
+    test.socket.zigbee:__queue_receive({ mock_device.id, custom_report(0x800A, data_types.Boolean.ID, true) })
+    expect_sync()
+    test.wait_for_events()
+
+    -- same request again a minute later: ignored
+    test.mock_time.advance_time(60)
+    test.socket.zigbee:__queue_receive({ mock_device.id, custom_report(0x800A, data_types.Boolean.ID, true) })
+    test.wait_for_events()
+
+    -- after the 5 minute window it is answered again
+    test.mock_time.advance_time(300)
+    test.socket.zigbee:__queue_receive({ mock_device.id, custom_report(0x800A, data_types.Boolean.ID, true) })
+    expect_sync()
+    test.wait_for_events()
+  end
+)
+
+test.register_coroutine_test(
+  "SR-3: out-of-range preference values are ignored",
+  function()
+    test.socket.device_lifecycle:__queue_receive(mock_device:generate_info_changed({
+      preferences = { sensorMode = "9", panelBrightness = 500, tempCalibration = 12, maxHeatTemp = 99 },
+    }))
+    expect_only_refresh_after()
+  end
+)
+
+test.register_message_test(
+  "SR-3: an invalid (0x8000) setpoint report is not emitted",
+  {
+    { channel = "zigbee", direction = "receive",
+      message = { mock_device.id, Thermostat.attributes.OccupiedHeatingSetpoint:build_test_attr_report(mock_device, -32768) } },
+  }
+)
+
+test.register_message_test(
+  "SR-3: an implausible temperature report is not emitted",
+  {
+    { channel = "zigbee", direction = "receive",
+      message = { mock_device.id, Thermostat.attributes.LocalTemperature:build_test_attr_report(mock_device, 12000) } },
+  }
+)
+
+test.register_coroutine_test(
+  "SR-3: setThermostatMode('auto') maps to the device's schedule mode",
+  function()
+    test.timer.__create_and_queue_test_time_advance_timer(2, "oneshot")
+    test.socket.capability:__queue_receive({ mock_device.id,
+      { capability = "thermostatMode", component = "main", command = "setThermostatMode", args = { "auto" } } })
+    test.socket.zigbee:__expect_send({ mock_device.id, Thermostat.attributes.SystemMode:write(mock_device, 0x04) })
+    test.socket.zigbee:__expect_send({ mock_device.id, thermostat_cmd(0x08, false) })
+    test.socket.zigbee:__expect_send({ mock_device.id, thermostat_cmd(0x07, true) })
+    test.wait_for_events()
+  end
+)
+
 test.run_registered_tests()

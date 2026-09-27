@@ -82,10 +82,29 @@ local FIELD_PROG_MODE   = "namron_prog_mode"
 local FIELD_FROST       = "namron_frost"
 
 local POLL_INTERVAL_S = 15 * 60
+-- Minimum time between clock syncs triggered by the device's own sync requests.
+-- Stops a device that keeps re-raising the flag from flooding the Zigbee mesh.
+local CLOCK_SYNC_MIN_INTERVAL_S = 5 * 60
+local FIELD_LAST_CLOCK_SYNC = "namron_last_clock_sync"
+
+-- Plausible range for temperatures reported by the device (°C). Anything outside is
+-- treated as invalid (e.g. 0x8000 = "not available") and not shown to the user.
+local REPORTED_TEMP_MIN_C = -40
+local REPORTED_TEMP_MAX_C = 80
 
 -- ---------------------------------------------------------------------------
 -- Low-level helpers
 -- ---------------------------------------------------------------------------
+--- Convert v to an integer within [min, max]. Returns nil for nil, NaN, fractions
+--- that cannot be rounded meaningfully, or out-of-range values.
+local function to_int_in_range(v, min, max)
+  local n = tonumber(v)
+  if n == nil or n ~= n then return nil end
+  n = utils.round(n)
+  if n < min or n > max then return nil end
+  return n
+end
+
 local function thermostat_cluster_id()
   return data_types.ClusterId(Thermostat.ID)
 end
@@ -126,12 +145,23 @@ local function send_thermostat_command(device, cmd_id, flag)
   }))
 end
 
-local function sync_clock(device)
-  local now = os.time() - EPOCH_2000
+--- Push the hub's time to the thermostat.
+--- @param force boolean bypass the rate limit (used for explicit user/configure actions)
+local function sync_clock(device, force)
+  local now_epoch = os.time()
+  local now = now_epoch - EPOCH_2000
   if now <= 0 then
     log.warn(string.format("[%s] hub clock not set, skipping thermostat clock sync", device.label))
     return
   end
+  local last = device:get_field(FIELD_LAST_CLOCK_SYNC)
+  -- (a hub clock that jumped backwards also counts as "due", so syncing never stalls)
+  if not force and last ~= nil and now_epoch >= last and (now_epoch - last) < CLOCK_SYNC_MIN_INTERVAL_S then
+    log.debug(string.format("[%s] clock sync requested again within %ds, ignoring", device.label,
+      CLOCK_SYNC_MIN_INTERVAL_S))
+    return
+  end
+  device:set_field(FIELD_LAST_CLOCK_SYNC, now_epoch)
   write_custom(device, ATTR.TIME, data_types.Uint32, now)
   write_custom(device, ATTR.TIME_SYNC_REQUEST, data_types.Boolean, false)
 end
@@ -169,15 +199,26 @@ end
 -- ---------------------------------------------------------------------------
 -- Zigbee attribute handlers
 -- ---------------------------------------------------------------------------
+--- Convert a ZCL temperature (0.01 °C, Int16) to °C, or nil if invalid/implausible.
+local function zcl_temperature_to_c(raw)
+  if type(raw) ~= "number" or raw == -32768 then return nil end
+  local c = raw / 100.0
+  if c < REPORTED_TEMP_MIN_C or c > REPORTED_TEMP_MAX_C then return nil end
+  return c
+end
+
 local function local_temperature_handler(driver, device, value, zb_rx)
-  if value.value == nil or value.value == -32768 or value.value == 0x8000 then return end
+  local c = zcl_temperature_to_c(value.value)
+  if c == nil then return end
   device:emit_event(capabilities.temperatureMeasurement.temperature({
-    value = utils.round(value.value / 10.0) / 10.0, unit = "C"
+    value = utils.round(c * 10) / 10.0, unit = "C"
   }))
 end
 
 local function heating_setpoint_handler(driver, device, value, zb_rx)
-  device:emit_event(HeatingSetpoint.heatingSetpoint({ value = value.value / 100.0, unit = "C" }))
+  local c = zcl_temperature_to_c(value.value)
+  if c == nil then return end
+  device:emit_event(HeatingSetpoint.heatingSetpoint({ value = c, unit = "C" }))
 end
 
 local function system_mode_handler(driver, device, value, zb_rx)
@@ -213,7 +254,7 @@ end
 
 local function time_sync_request_handler(driver, device, value, zb_rx)
   if (value.value == true or value.value == 1) and device.preferences.autoTimeSync ~= false then
-    sync_clock(device)
+    sync_clock(device, false)
   end
 end
 
@@ -221,7 +262,11 @@ end
 -- Capability command handlers
 -- ---------------------------------------------------------------------------
 local function set_heating_setpoint(driver, device, command)
-  local value = command.args.setpoint
+  local value = tonumber(command.args.setpoint)
+  if value == nil or value ~= value then
+    log.warn(string.format("[%s] ignoring invalid setpoint %s", device.label, tostring(command.args.setpoint)))
+    return
+  end
   if value >= 40 then value = utils.f_to_c(value) end -- assume Fahrenheit
   local max = tonumber(device.preferences.maxHeatTemp) or 35
   value = utils.clamp_value(value, 5, max)
@@ -269,6 +314,10 @@ local MODE_ACTIONS = {
     write_custom(device, ATTR.FROST, data_types.Boolean, true)
   end,
 }
+
+-- "auto" is what generic clients (and the capability's auto() command) send;
+-- the closest thing this thermostat has is its own weekly schedule.
+MODE_ACTIONS.auto = MODE_ACTIONS.schedule
 
 local function set_mode(driver, device, mode)
   local action = MODE_ACTIONS[mode]
@@ -324,7 +373,7 @@ local function do_configure(driver, device)
   device:send(SimpleMetering.attributes.Divisor:read(device))
 
   if device.preferences.autoTimeSync ~= false then
-    sync_clock(device)
+    sync_clock(device, true)
   end
   do_refresh(driver, device)
 end
@@ -354,46 +403,76 @@ local function device_init(driver, device)
   device.thread:call_on_schedule(POLL_INTERVAL_S, function() do_refresh(driver, device) end, "namron_poll")
 end
 
--- Preference name -> function(device, new_value)
+-- Preference name -> function(device, new_value). Each writer validates its input and
+-- returns false (after logging) when the value is unusable, so nothing is sent.
+local function int_pref(attr_id, data_type, min, max, scale)
+  return function(device, v)
+    local n = to_int_in_range(v, min, max)
+    if n == nil then return false end
+    write_custom(device, attr_id, data_type, n * (scale or 1))
+    return true
+  end
+end
+
 local PREFERENCE_WRITERS = {
-  sensorMode = function(device, v)
-    write_custom(device, ATTR.SENSOR_MODE, data_types.Enum8, tonumber(v))
-  end,
+  sensorMode       = int_pref(ATTR.SENSOR_MODE, data_types.Enum8, 0, 6),
+  panelBrightness  = int_pref(ATTR.PANEL_BRIGHTNESS, data_types.Uint8, 1, 100),
+  screenOnTime     = int_pref(ATTR.SCREEN_ON_TIME, data_types.Enum8, 0, 3),
+  regulatorPercent = int_pref(ATTR.REGULATOR_PERCENT, data_types.Int16, 0, 100),
   tempCalibration = function(device, v)
-    device:send(Thermostat.attributes.LocalTemperatureCalibration:write(device, utils.round(tonumber(v) * 10)))
+    local tenths = to_int_in_range((tonumber(v) or 0/0) * 10, -30, 30)
+    if tenths == nil then return false end
+    device:send(Thermostat.attributes.LocalTemperatureCalibration:write(device, tenths))
+    return true
   end,
   childLock = function(device, v)
+    if type(v) ~= "boolean" then return false end
     device:send(ThermostatUI.attributes.KeypadLockout:write(device, v and 1 or 0))
+    return true
   end,
   windowDetection = function(device, v)
-    write_custom(device, ATTR.WINDOW_CHECK, data_types.Boolean, v == true)
-  end,
-  panelBrightness = function(device, v)
-    write_custom(device, ATTR.PANEL_BRIGHTNESS, data_types.Uint8, tonumber(v))
-  end,
-  screenOnTime = function(device, v)
-    write_custom(device, ATTR.SCREEN_ON_TIME, data_types.Enum8, tonumber(v))
-  end,
-  regulatorPercent = function(device, v)
-    write_custom(device, ATTR.REGULATOR_PERCENT, data_types.Int16, tonumber(v))
+    if type(v) ~= "boolean" then return false end
+    write_custom(device, ATTR.WINDOW_CHECK, data_types.Boolean, v)
+    return true
   end,
   maxHeatTemp = function(device, v)
-    write_custom(device, ATTR.MAX_HEAT_TEMP, data_types.Int16, tonumber(v) * 10)
-    device:emit_event(HeatingSetpoint.heatingSetpointRange({ value = { minimum = 5, maximum = tonumber(v) }, unit = "C" },
+    local n = to_int_in_range(v, 15, 35)
+    if n == nil then return false end
+    write_custom(device, ATTR.MAX_HEAT_TEMP, data_types.Int16, n * 10)
+    device:emit_event(HeatingSetpoint.heatingSetpointRange({ value = { minimum = 5, maximum = n }, unit = "C" },
       { visibility = { displayed = false } }))
+    return true
   end,
   autoTimeSync = function(device, v)
-    write_custom(device, ATTR.AUTO_TIME, data_types.Boolean, v == true)
-    if v then sync_clock(device) end
+    if type(v) ~= "boolean" then return false end
+    write_custom(device, ATTR.AUTO_TIME, data_types.Boolean, v)
+    if v then sync_clock(device, true) end
+    return true
   end,
 }
 
 local function info_changed(driver, device, event, args)
-  local old = (args and args.old_st_store and args.old_st_store.preferences) or {}
+  local old_store = args and args.old_st_store
+  if old_store == nil then return end
+
+  -- A profile change (e.g. switching from "Zigbee Switch" to this driver) makes every
+  -- preference look "new". Those are defaults, not user choices, so writing them would
+  -- silently reconfigure the thermostat (sensor mode, limits...). Only act on real edits.
+  local old_profile = old_store.profile and old_store.profile.id
+  local new_profile = device.profile and device.profile.id
+  if old_profile ~= nil and new_profile ~= nil and old_profile ~= new_profile then
+    log.info(string.format("[%s] profile changed, not writing default preferences to the device", device.label))
+    return
+  end
+
+  local old = old_store.preferences or {}
   for name, writer in pairs(PREFERENCE_WRITERS) do
     local new_value = device.preferences[name]
     if new_value ~= nil and new_value ~= old[name] then
-      writer(device, new_value)
+      if not writer(device, new_value) then
+        log.warn(string.format("[%s] ignoring invalid value %s for preference %s", device.label,
+          tostring(new_value), name))
+      end
     end
   end
 end

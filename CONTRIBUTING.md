@@ -9,6 +9,8 @@ Contributions are welcome, from people and from AI coding agents. The rules are 
 3. **Use only the standard SmartThings Edge libraries.** No third-party Lua modules, no network access from drivers, and no new driver permissions beyond `zigbee`.
 4. **Keep it small.** Prefer the SmartThings default handlers (`st.zigbee.defaults`) over custom code. Change only what the device actually needs.
 5. **Cite your source** for device attributes and quirks, for example Zigbee2MQTT, a zigbee-herdsman-converters PR, the Namron manual, or your own logcat output.
+6. **Anything that writes to the device must validate its input and have a test.** These drivers control heating. See `docs/security/` for past findings.
+7. **All changes go through a pull request** and are reviewed by the code owner before merge. Releases to the SmartThings channel follow [RELEASING.md](RELEASING.md) and are done by the maintainer only.
 
 ## Adding a device that behaves like an existing one
 
