@@ -269,8 +269,17 @@ end
 -- ---------------------------------------------------------------------------
 local POWER_FALLBACK_AFTER_SKIPS = 3
 local FIELD_POWER_SKIPS = "namron_power_scale_skips"
+-- Minimum time between energy scale requests, so firmware that never answers the
+-- divisor doesn't get two reads on every energy report.
+local ENERGY_SCALE_RETRY_S = 5 * 60
+local FIELD_LAST_ENERGY_SCALE_REQUEST = "namron_last_energy_scale_request"
 
 local function request_metering_scale(device)
+  local now = os.time()
+  local last = device:get_field(FIELD_LAST_ENERGY_SCALE_REQUEST)
+  -- (a hub clock that jumped backwards also counts as "due", like the clock sync limit)
+  if last ~= nil and now >= last and (now - last) < ENERGY_SCALE_RETRY_S then return end
+  device:set_field(FIELD_LAST_ENERGY_SCALE_REQUEST, now)
   device:send(SimpleMetering.attributes.Multiplier:read(device))
   device:send(SimpleMetering.attributes.Divisor:read(device))
 end

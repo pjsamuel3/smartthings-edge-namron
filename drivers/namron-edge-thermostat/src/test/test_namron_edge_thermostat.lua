@@ -305,6 +305,35 @@ test.register_coroutine_test(
 )
 
 test.register_coroutine_test(
+  "#14: energy scale requests are rate limited while the divisor is unknown",
+  function()
+    local SM = clusters.SimpleMetering
+    local function energy_report()
+      test.socket.zigbee:__queue_receive({ mock_device.id, SM.attributes.CurrentSummationDelivered:build_test_attr_report(mock_device, 15668) })
+    end
+    local function expect_scale_request()
+      test.socket.zigbee:__expect_send({ mock_device.id, SM.attributes.Multiplier:read(mock_device) })
+      test.socket.zigbee:__expect_send({ mock_device.id, SM.attributes.Divisor:read(mock_device) })
+    end
+    test.mock_time.advance_time(1790000000)
+    energy_report()
+    expect_scale_request()
+    test.wait_for_events()
+    -- further reports within 5 minutes: nothing sent, nothing emitted
+    for _ = 1, 5 do
+      test.mock_time.advance_time(5)
+      energy_report()
+      test.wait_for_events()
+    end
+    -- after 5 minutes the scale is requested again
+    test.mock_time.advance_time(300)
+    energy_report()
+    expect_scale_request()
+    test.wait_for_events()
+  end
+)
+
+test.register_coroutine_test(
   "Power falls back to raw watts if the device never reports a divisor",
   function()
     local EM = clusters.ElectricalMeasurement
