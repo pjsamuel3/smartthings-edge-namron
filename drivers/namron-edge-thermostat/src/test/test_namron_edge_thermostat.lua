@@ -1,0 +1,364 @@
+-- Integration tests for the Namron Edge Thermostat driver
+local test              = require "integration_test"
+local t_utils           = require "integration_test.utils"
+local zigbee_test_utils = require "integration_test.zigbee_test_utils"
+local capabilities      = require "st.capabilities"
+local clusters          = require "st.zigbee.zcl.clusters"
+local data_types        = require "st.zigbee.data_types"
+local cluster_base      = require "st.zigbee.cluster_base"
+local zcl_messages      = require "st.zigbee.zcl"
+local messages          = require "st.zigbee.messages"
+local zb_const          = require "st.zigbee.constants"
+local generic_body      = require "st.zigbee.generic_body"
+local FrameCtrl         = require "st.zigbee.zcl.frame_ctrl"
+
+local Thermostat   = clusters.Thermostat
+local ThermostatUI = clusters.ThermostatUserInterfaceConfiguration
+
+local mock_device = test.mock_device.build_test_zigbee_device({
+  profile = t_utils.get_profile_definition("namron-edge-thermostat.yml"),
+  zigbee_endpoints = {
+    [1] = {
+      id = 1,
+      manufacturer = "Namron AS",
+      model = "4512783",
+      server_clusters = { 0x0000, 0x0003, 0x0006, 0x0201, 0x0204, 0x0405, 0x0702, 0x0B04 },
+    },
+  },
+})
+
+zigbee_test_utils.prepare_zigbee_env_info()
+
+local function test_init()
+  test.mock_device.add_test_device(mock_device)
+end
+test.set_test_init_function(test_init)
+
+local SUPPORTED_MODES = { "off", "heat", "eco", "schedule", "frostguard" }
+
+local function mode_event(mode)
+  return mock_device:generate_test_message("main",
+    capabilities.thermostatMode.thermostatMode[mode]({ data = { supportedThermostatModes = SUPPORTED_MODES } }))
+end
+
+local function custom_report(attr_id, dt_id, value)
+  return zigbee_test_utils.build_attribute_report(mock_device, Thermostat.ID, { { attr_id, dt_id, value } })
+end
+
+local function custom_read(attr_id)
+  return cluster_base.read_attribute(mock_device, data_types.ClusterId(Thermostat.ID), data_types.AttributeId(attr_id))
+end
+
+local function custom_write(attr_id, value)
+  return cluster_base.write_attribute(mock_device, data_types.ClusterId(Thermostat.ID),
+    data_types.AttributeId(attr_id), value)
+end
+
+local function thermostat_cmd(cmd_id, flag)
+  local fc = FrameCtrl(0x00)
+  fc:set_cluster_specific()
+  return messages.ZigbeeMessageTx({
+    address_header = messages.AddressHeader(zb_const.HUB.ADDR, zb_const.HUB.ENDPOINT,
+      mock_device:get_short_address(), 1, zb_const.HA_PROFILE_ID, Thermostat.ID),
+    body = zcl_messages.ZclMessageBody({
+      zcl_header = zcl_messages.ZclHeader({ cmd = data_types.ZCLCommandId(cmd_id), frame_ctrl = fc }),
+      zcl_body = generic_body.GenericBody(string.char(flag and 1 or 0)),
+    }),
+  })
+end
+
+test.register_message_test(
+  "Local temperature report is emitted as temperatureMeasurement",
+  {
+    { channel = "zigbee", direction = "receive",
+      message = { mock_device.id, Thermostat.attributes.LocalTemperature:build_test_attr_report(mock_device, 2350) } },
+    { channel = "capability", direction = "send",
+      message = mock_device:generate_test_message("main",
+        capabilities.temperatureMeasurement.temperature({ value = 23.5, unit = "C" })) },
+  }
+)
+
+test.register_message_test(
+  "Heating setpoint report is emitted",
+  {
+    { channel = "zigbee", direction = "receive",
+      message = { mock_device.id, Thermostat.attributes.OccupiedHeatingSetpoint:build_test_attr_report(mock_device, 2150) } },
+    { channel = "capability", direction = "send",
+      message = mock_device:generate_test_message("main",
+        capabilities.thermostatHeatingSetpoint.heatingSetpoint({ value = 21.5, unit = "C" })) },
+  }
+)
+
+test.register_message_test(
+  "Running state heat bit maps to heating",
+  {
+    { channel = "zigbee", direction = "receive",
+      message = { mock_device.id, Thermostat.attributes.ThermostatRunningState:build_test_attr_report(mock_device, 0x0001) } },
+    { channel = "capability", direction = "send",
+      message = mock_device:generate_test_message("main",
+        capabilities.thermostatOperatingState.thermostatOperatingState.heating()) },
+  }
+)
+
+test.register_message_test(
+  "Running state with no bits maps to idle",
+  {
+    { channel = "zigbee", direction = "receive",
+      message = { mock_device.id, Thermostat.attributes.ThermostatRunningState:build_test_attr_report(mock_device, 0x0000) } },
+    { channel = "capability", direction = "send",
+      message = mock_device:generate_test_message("main",
+        capabilities.thermostatOperatingState.thermostatOperatingState.idle()) },
+  }
+)
+
+test.register_coroutine_test(
+  "Mode is derived from system mode, programming mode and frost flag",
+  function()
+    test.socket.zigbee:__queue_receive({ mock_device.id,
+      Thermostat.attributes.SystemMode:build_test_attr_report(mock_device, 0x04) })
+    test.socket.capability:__expect_send(mode_event("heat"))
+    test.wait_for_events()
+
+    test.socket.zigbee:__queue_receive({ mock_device.id,
+      Thermostat.attributes.ThermostatProgrammingOperationMode:build_test_attr_report(mock_device, 0x04) })
+    test.socket.capability:__expect_send(mode_event("eco"))
+    test.wait_for_events()
+
+    test.socket.zigbee:__queue_receive({ mock_device.id,
+      Thermostat.attributes.ThermostatProgrammingOperationMode:build_test_attr_report(mock_device, 0x01) })
+    test.socket.capability:__expect_send(mode_event("schedule"))
+    test.wait_for_events()
+
+    test.socket.zigbee:__queue_receive({ mock_device.id, custom_report(0x8001, data_types.Boolean.ID, true) })
+    test.socket.capability:__expect_send(mode_event("frostguard"))
+    test.wait_for_events()
+
+    test.socket.zigbee:__queue_receive({ mock_device.id,
+      Thermostat.attributes.SystemMode:build_test_attr_report(mock_device, 0x00) })
+    test.socket.capability:__expect_send(mode_event("off"))
+    test.wait_for_events()
+  end
+)
+
+test.register_coroutine_test(
+  "setHeatingSetpoint writes the setpoint and reads it back",
+  function()
+    test.timer.__create_and_queue_test_time_advance_timer(2, "oneshot")
+    test.socket.capability:__queue_receive({ mock_device.id,
+      { capability = "thermostatHeatingSetpoint", component = "main", command = "setHeatingSetpoint", args = { 22.5 } } })
+    test.socket.zigbee:__expect_send({ mock_device.id,
+      Thermostat.attributes.OccupiedHeatingSetpoint:write(mock_device, 2250) })
+    test.wait_for_events()
+    test.mock_time.advance_time(2)
+    test.socket.zigbee:__expect_send({ mock_device.id,
+      Thermostat.attributes.OccupiedHeatingSetpoint:read(mock_device) })
+    test.wait_for_events()
+  end
+)
+
+test.register_coroutine_test(
+  "setHeatingSetpoint is clamped to the 5-35 range",
+  function()
+    test.timer.__create_and_queue_test_time_advance_timer(2, "oneshot")
+    test.socket.capability:__queue_receive({ mock_device.id,
+      { capability = "thermostatHeatingSetpoint", component = "main", command = "setHeatingSetpoint", args = { 3 } } })
+    test.socket.zigbee:__expect_send({ mock_device.id,
+      Thermostat.attributes.OccupiedHeatingSetpoint:write(mock_device, 500) })
+    test.wait_for_events()
+  end
+)
+
+test.register_coroutine_test(
+  "Setting eco mode switches heating on and sends setEco(true)",
+  function()
+    test.timer.__create_and_queue_test_time_advance_timer(2, "oneshot")
+    test.socket.capability:__queue_receive({ mock_device.id,
+      { capability = "thermostatMode", component = "main", command = "setThermostatMode", args = { "eco" } } })
+    test.socket.zigbee:__expect_send({ mock_device.id, Thermostat.attributes.SystemMode:write(mock_device, 0x04) })
+    test.socket.zigbee:__expect_send({ mock_device.id, thermostat_cmd(0x08, true) })
+    test.wait_for_events()
+    test.mock_time.advance_time(2)
+    test.socket.zigbee:__expect_send({ mock_device.id, Thermostat.attributes.SystemMode:read(mock_device) })
+    test.socket.zigbee:__expect_send({ mock_device.id,
+      Thermostat.attributes.ThermostatProgrammingOperationMode:read(mock_device) })
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x8001) })
+    test.wait_for_events()
+  end
+)
+
+test.register_coroutine_test(
+  "Setting heat from eco clears eco and schedule",
+  function()
+    test.socket.zigbee:__queue_receive({ mock_device.id,
+      Thermostat.attributes.SystemMode:build_test_attr_report(mock_device, 0x04) })
+    test.socket.capability:__expect_send(mode_event("heat"))
+    test.wait_for_events()
+
+    test.timer.__create_and_queue_test_time_advance_timer(2, "oneshot")
+    test.socket.capability:__queue_receive({ mock_device.id,
+      { capability = "thermostatMode", component = "main", command = "heat", args = {} } })
+    test.socket.zigbee:__expect_send({ mock_device.id, thermostat_cmd(0x08, false) })
+    test.socket.zigbee:__expect_send({ mock_device.id, thermostat_cmd(0x07, false) })
+    test.wait_for_events()
+  end
+)
+
+test.register_coroutine_test(
+  "Setting frostguard writes the frost attribute after a read",
+  function()
+    test.timer.__create_and_queue_test_time_advance_timer(2, "oneshot")
+    test.socket.capability:__queue_receive({ mock_device.id,
+      { capability = "thermostatMode", component = "main", command = "setThermostatMode", args = { "frostguard" } } })
+    test.socket.zigbee:__expect_send({ mock_device.id, Thermostat.attributes.SystemMode:write(mock_device, 0x04) })
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x8001) })
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_write(0x8001, data_types.Boolean(true)) })
+    test.wait_for_events()
+  end
+)
+
+test.register_coroutine_test(
+  "Changing preferences writes the matching attributes",
+  function()
+    test.socket.device_lifecycle:__queue_receive(mock_device:generate_info_changed({
+      preferences = { sensorMode = "6", childLock = true, panelBrightness = 80, tempCalibration = -1.5 },
+    }))
+    test.socket.zigbee:__set_channel_ordering("relaxed")
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x8004) })
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_write(0x8004, data_types.Enum8(6)) })
+    test.socket.zigbee:__expect_send({ mock_device.id, ThermostatUI.attributes.KeypadLockout:write(mock_device, 1) })
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x8005) })
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_write(0x8005, data_types.Uint8(80)) })
+    test.socket.zigbee:__expect_send({ mock_device.id,
+      Thermostat.attributes.LocalTemperatureCalibration:write(mock_device, -15) })
+    test.wait_for_events()
+  end
+)
+
+test.register_coroutine_test(
+  "Clock sync request from the device is answered",
+  function()
+    test.mock_time.advance_time(1790000000) -- a 2026 timestamp
+    test.socket.zigbee:__queue_receive({ mock_device.id, custom_report(0x800A, data_types.Boolean.ID, true) })
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x800B) })
+    test.socket.zigbee:__expect_send({ mock_device.id,
+      custom_write(0x800B, data_types.Uint32(os.time() - 946684800)) })
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_read(0x800A) })
+    test.socket.zigbee:__expect_send({ mock_device.id, custom_write(0x800A, data_types.Boolean(false)) })
+    test.wait_for_events()
+  end
+)
+
+test.register_message_test(
+  "Refresh reads all state",
+  {
+    { channel = "capability", direction = "receive",
+      message = { mock_device.id, { capability = "refresh", component = "main", command = "refresh", args = {} } } },
+    { channel = "zigbee", direction = "send",
+      message = { mock_device.id, Thermostat.attributes.LocalTemperature:read(mock_device) } },
+    { channel = "zigbee", direction = "send",
+      message = { mock_device.id, Thermostat.attributes.OccupiedHeatingSetpoint:read(mock_device) } },
+    { channel = "zigbee", direction = "send",
+      message = { mock_device.id, Thermostat.attributes.ThermostatRunningState:read(mock_device) } },
+    { channel = "zigbee", direction = "send",
+      message = { mock_device.id, Thermostat.attributes.SystemMode:read(mock_device) } },
+    { channel = "zigbee", direction = "send",
+      message = { mock_device.id, Thermostat.attributes.ThermostatProgrammingOperationMode:read(mock_device) } },
+    { channel = "zigbee", direction = "send",
+      message = { mock_device.id, custom_read(0x8001) } },
+    { channel = "zigbee", direction = "send",
+      message = { mock_device.id, clusters.RelativeHumidity.attributes.MeasuredValue:read(mock_device) } },
+    { channel = "zigbee", direction = "send",
+      message = { mock_device.id, clusters.ElectricalMeasurement.attributes.ActivePower:read(mock_device) } },
+    { channel = "zigbee", direction = "send",
+      message = { mock_device.id, clusters.SimpleMetering.attributes.CurrentSummationDelivered:read(mock_device) } },
+  }
+)
+
+test.register_message_test(
+  "Power report uses the default power meter handler",
+  {
+    { channel = "zigbee", direction = "receive",
+      message = { mock_device.id, clusters.ElectricalMeasurement.attributes.ActivePower:build_test_attr_report(mock_device, 1200) } },
+    { channel = "capability", direction = "send",
+      message = mock_device:generate_test_message("main", capabilities.powerMeter.power({ value = 1200.0, unit = "W" })) },
+  }
+)
+
+test.register_message_test(
+  "Humidity report is emitted",
+  {
+    { channel = "zigbee", direction = "receive",
+      message = { mock_device.id, clusters.RelativeHumidity.attributes.MeasuredValue:build_test_attr_report(mock_device, 4500) } },
+    { channel = "capability", direction = "send",
+      message = mock_device:generate_test_message("main", capabilities.relativeHumidityMeasurement.humidity({ value = 45 })) },
+  }
+)
+
+local function expect_configure_messages()
+  local SM, EM, RH = clusters.SimpleMetering, clusters.ElectricalMeasurement, clusters.RelativeHumidity
+  for _, cid in ipairs({ Thermostat.ID, ThermostatUI.ID, RH.ID, SM.ID, EM.ID }) do
+    test.socket.zigbee:__expect_send({ mock_device.id,
+      zigbee_test_utils.build_bind_request(mock_device, zigbee_test_utils.mock_hub_eui, cid) })
+  end
+  local expected = {
+    Thermostat.attributes.LocalTemperature:configure_reporting(mock_device, 10, 300, 10),
+    Thermostat.attributes.OccupiedHeatingSetpoint:configure_reporting(mock_device, 1, 600, 10),
+    Thermostat.attributes.SystemMode:configure_reporting(mock_device, 1, 600),
+    Thermostat.attributes.ThermostatRunningState:configure_reporting(mock_device, 1, 600),
+    Thermostat.attributes.ThermostatProgrammingOperationMode:configure_reporting(mock_device, 1, 600),
+    RH.attributes.MeasuredValue:configure_reporting(mock_device, 10, 600, 100),
+    EM.attributes.ActivePower:configure_reporting(mock_device, 5, 600, 5),
+    SM.attributes.CurrentSummationDelivered:configure_reporting(mock_device, 5, 3600, 1),
+    EM.attributes.ACPowerMultiplier:read(mock_device),
+    EM.attributes.ACPowerDivisor:read(mock_device),
+    SM.attributes.Multiplier:read(mock_device),
+    SM.attributes.Divisor:read(mock_device),
+    custom_read(0x800B),
+    custom_write(0x800B, data_types.Uint32(os.time() - 946684800)),
+    custom_read(0x800A),
+    custom_write(0x800A, data_types.Boolean(false)),
+    Thermostat.attributes.LocalTemperature:read(mock_device),
+    Thermostat.attributes.OccupiedHeatingSetpoint:read(mock_device),
+    Thermostat.attributes.ThermostatRunningState:read(mock_device),
+    Thermostat.attributes.SystemMode:read(mock_device),
+    Thermostat.attributes.ThermostatProgrammingOperationMode:read(mock_device),
+    custom_read(0x8001),
+    RH.attributes.MeasuredValue:read(mock_device),
+    EM.attributes.ActivePower:read(mock_device),
+    SM.attributes.CurrentSummationDelivered:read(mock_device),
+  }
+  for _, msg in ipairs(expected) do
+    test.socket.zigbee:__expect_send({ mock_device.id, msg })
+  end
+end
+
+test.register_coroutine_test(
+  "doConfigure binds, configures reporting, syncs the clock and refreshes",
+  function()
+    test.mock_time.advance_time(1790000000)
+    test.socket.zigbee:__set_channel_ordering("relaxed")
+    test.socket.device_lifecycle:__queue_receive({ mock_device.id, "doConfigure" })
+    expect_configure_messages()
+    mock_device:expect_metadata_update({ provisioning_state = "PROVISIONED" })
+    test.wait_for_events()
+  end
+)
+
+test.register_coroutine_test(
+  "driverSwitched moves the device to the thermostat profile and configures it",
+  function()
+    test.mock_time.advance_time(1790000000)
+    test.socket.zigbee:__set_channel_ordering("relaxed")
+    test.socket.device_lifecycle:__queue_receive({ mock_device.id, "driverSwitched" })
+    mock_device:expect_metadata_update({ profile = "namron-edge-thermostat", provisioning_state = "PROVISIONED" })
+    test.socket.capability:__expect_send(mock_device:generate_test_message("main",
+      capabilities.thermostatMode.supportedThermostatModes(SUPPORTED_MODES, { visibility = { displayed = false } })))
+    test.socket.capability:__expect_send(mock_device:generate_test_message("main",
+      capabilities.thermostatHeatingSetpoint.heatingSetpointRange({ value = { minimum = 5, maximum = 35 }, unit = "C" },
+        { visibility = { displayed = false } })))
+    expect_configure_messages()
+    test.wait_for_events()
+  end
+)
+
+test.run_registered_tests()

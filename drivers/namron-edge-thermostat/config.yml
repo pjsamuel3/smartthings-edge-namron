@@ -1,0 +1,6 @@
+name: 'Namron Edge Thermostat'
+packageKey: 'namron-edge-thermostat'
+description: 'Namron Zigbee Edge Termostat (4512783/4512784/4566702/4566703) - setpoint, modes, power, energy, humidity'
+permissions:
+  zigbee: {}
+vendorSupportInformation: 'https://github.com/pjsamuel3/smartthings-edge-namron/issues'

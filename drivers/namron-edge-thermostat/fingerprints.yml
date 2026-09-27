@@ -1,0 +1,41 @@
+zigbeeManufacturer:
+  - id: "NamronAS/4512783"
+    deviceLabel: Namron Edge Thermostat
+    manufacturer: Namron AS
+    model: "4512783"
+    deviceProfileName: namron-edge-thermostat
+  - id: "NamronAS/4512784"
+    deviceLabel: Namron Edge Thermostat
+    manufacturer: Namron AS
+    model: "4512784"
+    deviceProfileName: namron-edge-thermostat
+  - id: "NamronAS/4566702"
+    deviceLabel: Namron Edge Thermostat
+    manufacturer: Namron AS
+    model: "4566702"
+    deviceProfileName: namron-edge-thermostat
+  - id: "NamronAS/4566703"
+    deviceLabel: Namron Edge Thermostat
+    manufacturer: Namron AS
+    model: "4566703"
+    deviceProfileName: namron-edge-thermostat
+  - id: "NAMRONAS/4512783"
+    deviceLabel: Namron Edge Thermostat
+    manufacturer: NAMRON AS
+    model: "4512783"
+    deviceProfileName: namron-edge-thermostat
+  - id: "NAMRONAS/4512784"
+    deviceLabel: Namron Edge Thermostat
+    manufacturer: NAMRON AS
+    model: "4512784"
+    deviceProfileName: namron-edge-thermostat
+  - id: "NAMRONAS/4566702"
+    deviceLabel: Namron Edge Thermostat
+    manufacturer: NAMRON AS
+    model: "4566702"
+    deviceProfileName: namron-edge-thermostat
+  - id: "NAMRONAS/4566703"
+    deviceLabel: Namron Edge Thermostat
+    manufacturer: NAMRON AS
+    model: "4566703"
+    deviceProfileName: namron-edge-thermostat
