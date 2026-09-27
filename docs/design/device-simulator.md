@@ -1,6 +1,6 @@
 # Design: simulated Namron thermostat and randomised invariant tests
 
-**Issue:** #12 · **Status:** proposed, awaiting maintainer review · **Date:** 27 Sep 2026
+**Issue:** #12 · **Status:** accepted (PR #13), implemented · **Date:** 27 Sep 2026
 
 ## Why
 
@@ -29,7 +29,7 @@ For simulator tests, the test file replaces `send` on the mock channel objects:
 
 - `test.socket.zigbee.send` → decodes the outgoing `ZigbeeMessageTx`, records it, passes it to the simulator, and queues the simulator's replies with `test.socket.zigbee:__queue_receive`.
 - `test.socket.capability.send` → records emitted capability events, for the invariant checks.
-- The global `report_error` (a no-op in the framework, called when a handler raises) → records the error, so "no handler errors" can be asserted. *Today a handler error does not fail a test at all.*
+- *(Correction during implementation: no `report_error` hook is needed. The framework already runs the driver with `_fail_on_error = true`, so any handler error fails the test.)*
 
 The overrides are installed in the simulator test's init function and live only in that test file. The framework itself isn't modified. The trade-off is that the tests rely on mock internals. The libs are pinned by checksum, so this only matters when upgrading them. If an upgrade breaks it, the simulator test fails loudly rather than passing silently.
 
@@ -90,7 +90,7 @@ Each failure prints the seed and the step list, so it can be replayed with `SIM_
 
 Checked after every step:
 
-1. **No handler errors:** nothing reached `report_error`.
+1. **No handler errors:** any error raised by a driver handler fails the test.
 2. **No unrequested configuration writes:** a write to a configuration attribute (0x8000, 0x8004, 0x8005, 0x8007, 0x801D, 0x8022, 0x8025, 0x8029, LocalTemperatureCalibration, KeypadLockout) is only allowed in the step where the user changed the matching preference to a valid value. That includes the driver switch step (SR-1).
 3. **Setpoint writes are in range:** every OccupiedHeatingSetpoint write is between 500 and `maxHeatTemp × 100` (≤ 3500).
 4. **Bounded message rate:**
@@ -119,6 +119,27 @@ The rate invariant is expected to flag one case straight away. If the Metering d
 1. **Seeds:** fixed seed list in CI, plus environment variables for local soak runs (proposed). Or a fresh random seed on each CI run: more coverage, but CI can then fail on an unrelated PR.
 2. **Mock overrides:** OK to replace `send` on the mock channels and the global `report_error` in this one test file (proposed)? The alternative is proposing a relaxed "record" mode upstream to SmartThingsEdgeDrivers, which is slower and outside our control.
 3. **Scope of phase 1:** the `4512783` profile only (proposed), since that's the only model confirmed on hardware.
+
+## Implementation notes
+
+These are the differences from the proposal above, found while building it:
+
+- **Handler errors:** already fatal in the framework (see the correction above), so invariant 1 needs no code.
+- **Timers:** the mock timer channel only fires timers that a test has queued. The simulator test replaces `test.timer.create_oneshot`/`create_interval` with timers that fire on mock time, so the 15-minute poll and the 2 s read-backs really run.
+- **Read-backs:** after each user step the test advances time by 3 s, so the driver's read-backs are counted as part of that user step, not as device-triggered traffic.
+- **Rate limits:** a device event may cause at most 4 messages (one clock sync). Device events and time passing together may cause at most 21 messages in any 5 minutes: one poll (9), one clock sync (4), one energy scale request (2) and up to three power scale requests (6). User-caused traffic isn't counted.
+- **Delayed reports:** energy reports are never delayed, because a stale cumulative value would legitimately go backwards. While a delayed report is pending, or after one has been delivered, the display-matches-device check pauses until the next full refresh or poll.
+- **Driver-switch start:** runs use the thermostat profile. A switch from the stock *Zigbee Switch* profile (SR-1) stays covered by its own regression test, because emitting thermostat events on the old profile isn't possible in the mock.
+- **Soak runs:** the framework can build at most about 255 mock devices per process, so `SIM_RUNS` is limited to 250. Use `SIM_SEED_BASE` to cover more seeds.
+- **Randomness:** a built-in 64-bit LCG, because `math.random` differs between macOS and Linux and seeds must replay identically in CI.
+- **Extra invariant 8:** the driver never sends a write the simulated firmware would reject (write-after-read, default response, ProgrammingOperationMode writes).
+
+### Findings and validation
+
+- **Found on first run:** #16. The setpoint limit used an unvalidated `maxHeatTemp`, so setpoints up to 37.8 °C were written. It was fixed in its own PR, as planned.
+- **Energy retry case** (listed above): fixed separately in #14/#15. With the #15 limit removed, the simulator catches it (rate invariant).
+- **Mutation check:** each of these was reintroduced in turn and caught by at least one invariant: #8 (energy before divisor), #15 (unlimited scale reads), writing every preference on infoChanged, SR-2 (unlimited clock sync), SR-3 (no preference range check, and no temperature plausibility check), a wrong eco bit in mode derivation, and a custom write without a preceding read.
+- **Soak:** 1,000 seeds × 200 steps pass on the fixed driver.
 
 ## Plan after approval
 
