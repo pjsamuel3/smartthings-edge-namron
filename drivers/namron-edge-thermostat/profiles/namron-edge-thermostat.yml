@@ -115,8 +115,8 @@ preferences:
     definition:
       default: true
   - name: utcOffset
-    title: "Time zone (hours from UTC, standard time)"
-    description: "Your local standard (winter) time offset, e.g. 1 for Norway, Sweden and Denmark, 2 for Finland, 0 for the UK. Leave 'Auto Daylight Saving' on at the thermostat; it adds the summer hour itself."
+    title: "Time zone (hours from UTC)"
+    description: "Your standard (winter) time offset from UTC, e.g. 1 for Norway, Sweden and Denmark, 2 for Finland, 0 for the UK. Leave 'Auto Daylight Saving' on at the thermostat; it adds the summer hour itself."
     required: false
     preferenceType: number
     definition:
