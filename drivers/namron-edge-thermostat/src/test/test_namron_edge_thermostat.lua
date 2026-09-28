@@ -37,7 +37,7 @@ test.set_test_init_function(test_init)
 -- The thermostat takes current local time (#19, #23). Most tests run at 1790000000
 -- (21 Sep 2026, EU summer time): default utcOffset 1 h + 1 h summer time = 2 h.
 local function thermostat_time(offset_hours)
-  return os.time() - 946684800 + math.floor((offset_hours or 2) * 3600)
+  return os.time() + math.floor((offset_hours or 2) * 3600) -- Unix time (#25)
 end
 
 local SUPPORTED_MODES = { "off", "heat", "eco", "schedule", "frostguard" }
