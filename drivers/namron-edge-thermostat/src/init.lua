@@ -53,7 +53,7 @@ local ATTR = {
   FAULT             = 0x8006, -- Bitmap (read-only)
   REGULATOR_CYCLE   = 0x8007, -- Uint8
   TIME_SYNC_REQUEST = 0x800A, -- Boolean, device sets 1 when it wants the time
-  TIME              = 0x800B, -- Uint32, seconds since 2000-01-01 UTC
+  TIME              = 0x800B, -- Uint32, Unix time (seconds since 1970), per HZC's own app
   REGULATOR_PERCENT = 0x801D, -- Int16 0..100
   AUTO_TIME         = 0x8022, -- Boolean
   MAX_HEAT_TEMP     = 0x8025, -- Int16, 0.1 °C
@@ -152,9 +152,11 @@ local function send_thermostat_command(device, cmd_id, flag)
   }))
 end
 
--- The thermostat has no time zone. With its Auto Sync Time on it shows 0x800B exactly as
--- sent (its own daylight saving option is hidden), so the driver sends current local time:
--- UTC + the utcOffset preference (standard time) + 1 h during EU summer time (#19, #23).
+-- 0x800B is Unix time (seconds since 1970), as HZC's own Homey app for the T11_ZG sends it
+-- (#25). Zigbee2MQTT and earlier versions of this driver sent seconds since 2000, which the
+-- thermostat acknowledged but ignored (a 1996 date). On top of UTC the driver adds the
+-- utcOffset preference plus 1 h during EU summer time (#19, #23); whether the thermostat
+-- applies its own time zone to the UTC value is still to be confirmed on hardware.
 local DEFAULT_UTC_OFFSET_MIN = 60 -- CET (Norway, Sweden, Denmark)
 
 --- Days since 1970-01-01 for a UTC date (proleptic Gregorian, H. Hinnant's algorithm).
@@ -203,8 +205,8 @@ end
 local function sync_clock(device, force)
   local now_epoch = os.time()
   local summer = summer_time_applies(device, now_epoch)
-  local now = now_epoch - EPOCH_2000 + (utc_offset_min(device) + (summer and 60 or 0)) * 60
-  if now <= 0 then
+  local now = now_epoch + (utc_offset_min(device) + (summer and 60 or 0)) * 60
+  if now_epoch <= EPOCH_2000 then
     log.warn(string.format("[%s] hub clock not set, skipping thermostat clock sync", device.label))
     return
   end

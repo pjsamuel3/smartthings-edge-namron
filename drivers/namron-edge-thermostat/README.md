@@ -27,10 +27,10 @@ These come from the Zigbee2MQTT converter (`zigbee-herdsman-converters/src/devic
 - Every custom write is sent after a read, because the firmware rejects the write otherwise.
 - Writes ask for a default response, because the firmware returns NOT_AUTHORIZED without one.
 - Eco and schedule use the thermostat's own commands 0x08 (setEco) and 0x07 (setProgram). Writing the ProgrammingOperationMode value directly is ignored.
-- Clock: attribute 0x800B is seconds since 2000-01-01 in **current local time**. The thermostat has no time zone, and with *Auto Sync Time* on it shows exactly what it's sent (its own *Auto Daylight Saving* option is hidden). Confirmed on a 4512783 (#19, #23).
-  - The driver sends UTC + the *Time zone* setting (standard time, default +1 for Norway, Sweden and Denmark) + 1 hour during EU summer time. EU summer time runs from 01:00 UTC on the last Sunday of March to the last Sunday of October; turn *Summer time (EU rules)* off elsewhere.
-  - The driver answers the device's sync request (0x800A) at most once every 5 minutes, and syncs straight away when either setting changes. When summer time starts or ends, the driver re-syncs once at its next 15-minute poll.
-- The value read back from 0x800B is the last sync time, not a running clock.
+- Clock: attribute 0x800B is **Unix time** (seconds since 1970), as HZC's own Homey app for the T11_ZG sends it (#25). Zigbee2MQTT sends seconds since 2000; the thermostat acknowledges that but ignores it, so its display clock never changes.
+  - The driver sends UTC + the *Time zone* setting (standard time, default +1) + 1 hour during EU summer time (*Summer time (EU rules)*, default on; last Sunday of March to last Sunday of October, 01:00 UTC). Whether the thermostat applies its own time zone to the value is still to be confirmed; if the display is off, adjust these two settings.
+  - The driver answers the device's sync request (0x800A), which it raises when *Auto Sync Time* is switched on and roughly daily, at most once every 5 minutes. It syncs straight away when either setting changes, and re-syncs once at its next 15-minute poll when summer time starts or ends.
+- The value read back from 0x800B is the last value written, not a running clock.
 - Temperatures reported outside −40…80 °C, and the ZCL "invalid" value 0x8000, are ignored.
 - The generic `auto` thermostat mode maps to the thermostat's weekly schedule.
 - Energy uses the Metering divisor (100 on firmware seen so far: raw 15668 = 156.68 kWh). The driver doesn't report energy until the divisor is known, because a wrong cumulative value can't be taken back. While it's unknown, the driver asks for it at most once every 5 minutes. Power waits for the Electrical Measurement divisor the same way, but falls back to raw watts after 3 reports.

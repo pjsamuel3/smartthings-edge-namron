@@ -99,7 +99,7 @@ local function eu_summer_time_oracle(epoch)
   return not after
 end
 
---- What 0x800B must be: current local time (#19, #23) = UTC + utcOffset (rounded to 15 min,
+--- What 0x800B must be: Unix time (#25) in current local time (#19, #23) = UTC + utcOffset (rounded to 15 min,
 --- 1 h if invalid) + 1 h during EU summer time unless euSummerTime is off.
 local function expected_thermostat_time(prefs)
   local v = prefs.utcOffset
@@ -107,7 +107,7 @@ local function expected_thermostat_time(prefs)
   if quarters == nil or quarters < -48 or quarters > 56 then quarters = 4 end
   local now = os.time()
   local summer = prefs.euSummerTime ~= false and eu_summer_time_oracle(now)
-  return now - 946684800 + quarters * 15 * 60 + (summer and 3600 or 0)
+  return now + quarters * 15 * 60 + (summer and 3600 or 0) -- Unix time (#25)
 end
 local CLOCK_ATTRS = { [attr_key("time")] = true, [attr_key("time_sync_request")] = true }
 local CONTROL_ATTRS = { [attr_key("system_mode")] = true, [attr_key("heating_setpoint")] = true,
