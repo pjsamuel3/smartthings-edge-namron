@@ -154,9 +154,9 @@ end
 
 -- 0x800B is Unix time (seconds since 1970), as HZC's own Homey app for the T11_ZG sends it
 -- (#25). Zigbee2MQTT and earlier versions of this driver sent seconds since 2000, which the
--- thermostat acknowledged but ignored (a 1996 date). On top of UTC the driver adds the
--- utcOffset preference plus 1 h during EU summer time (#19, #23); whether the thermostat
--- applies its own time zone to the UTC value is still to be confirmed on hardware.
+-- thermostat acknowledged but ignored (a 1996 date). The thermostat shows the value as
+-- local time without a time zone of its own (confirmed on a 4512783), so the driver adds
+-- the utcOffset preference plus 1 h during EU summer time (#19, #23).
 local DEFAULT_UTC_OFFSET_MIN = 60 -- CET (Norway, Sweden, Denmark)
 
 --- Days since 1970-01-01 for a UTC date (proleptic Gregorian, H. Hinnant's algorithm).

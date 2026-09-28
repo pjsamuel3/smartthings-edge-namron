@@ -28,7 +28,7 @@ These come from the Zigbee2MQTT converter (`zigbee-herdsman-converters/src/devic
 - Writes ask for a default response, because the firmware returns NOT_AUTHORIZED without one.
 - Eco and schedule use the thermostat's own commands 0x08 (setEco) and 0x07 (setProgram). Writing the ProgrammingOperationMode value directly is ignored.
 - Clock: attribute 0x800B is **Unix time** (seconds since 1970), as HZC's own Homey app for the T11_ZG sends it (#25). Zigbee2MQTT sends seconds since 2000; the thermostat acknowledges that but ignores it, so its display clock never changes.
-  - The driver sends UTC + the *Time zone* setting (standard time, default +1) + 1 hour during EU summer time (*Summer time (EU rules)*, default on; last Sunday of March to last Sunday of October, 01:00 UTC). Whether the thermostat applies its own time zone to the value is still to be confirmed; if the display is off, adjust these two settings.
+  - The driver sends UTC + the *Time zone* setting (standard time, default +1) + 1 hour during EU summer time (*Summer time (EU rules)*, default on; last Sunday of March to last Sunday of October, 01:00 UTC). Confirmed on a 4512783: with *Auto Sync Time* on, the thermostat shows exactly the time it's sent and applies no time zone of its own.
   - The driver answers the device's sync request (0x800A), which it raises when *Auto Sync Time* is switched on and roughly daily, at most once every 5 minutes. It syncs straight away when either setting changes, and re-syncs once at its next 15-minute poll when summer time starts or ends.
 - The value read back from 0x800B is the last value written, not a running clock.
 - Temperatures reported outside −40…80 °C, and the ZCL "invalid" value 0x8000, are ignored.
